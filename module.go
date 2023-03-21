@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	infra.Register(module)
+	infra.Mount(module)
 }
 
 var (
