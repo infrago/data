@@ -1,2 +1,2 @@
 # data
-infra.go data module.
+infra.Go data module.
