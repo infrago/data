@@ -5,20 +5,20 @@ import (
 	"github.com/infrago/infra"
 )
 
-func (this *Module) Register(o infra.Object) {
-	switch val := o.Object.(type) {
+func (this *Module) Register(name string, value Any) {
+	switch val := value.(type) {
 	case Driver:
-		module.Driver(o.Name, val)
+		module.Driver(name, val)
 	case Config:
-		module.Config(o.Name, val)
+		module.Config(name, val)
 	case Configs:
 		module.Configs(val)
 	case Table:
-		module.Table(o.Name, val)
+		module.Table(name, val)
 	case View:
-		module.View(o.Name, val)
+		module.View(name, val)
 	case Model:
-		module.Model(o.Name, val)
+		module.Model(name, val)
 	}
 }
 
