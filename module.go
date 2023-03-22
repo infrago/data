@@ -17,7 +17,7 @@ var (
 	module = &Module{
 		configs:   make(map[string]Config, 0),
 		drivers:   make(map[string]Driver, 0),
-		instances: make(map[string]Instance, 0),
+		instances: make(map[string]*Instance, 0),
 		tables:    make(map[string]Table, 0),
 		views:     make(map[string]View, 0),
 		models:    make(map[string]Model, 0),
@@ -39,7 +39,7 @@ type (
 		models map[string]Model
 
 		//连接
-		instances map[string]Instance
+		instances map[string]*Instance
 	}
 
 	Configs map[string]Config
@@ -50,9 +50,10 @@ type (
 		Setting Map
 	}
 	Instance struct {
-		name    string
-		config  Config
 		connect Connect
+		Name    string
+		Config  Config
+		Setting Map
 	}
 )
 
@@ -97,7 +98,7 @@ func (this *Module) Configs(config Configs) {
 }
 
 // Instance
-func (this *Module) Instance(names ...string) Instance {
+func (this *Module) Instance(names ...string) *Instance {
 	if len(names) > 0 {
 		if inst, ok := module.instances[names[0]]; ok {
 			return inst

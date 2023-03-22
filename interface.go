@@ -91,8 +91,12 @@ func (this *Module) Connect() {
 			panic("Invalid data driver: " + config.Driver)
 		}
 
+		inst := &Instance{
+			nil, name, config, config.Setting,
+		}
+
 		// 建立连接
-		connect, err := driver.Connect(name, config)
+		connect, err := driver.Connect(inst)
 		if err != nil {
 			panic("Failed to connect to data: " + err.Error())
 		}
@@ -104,10 +108,10 @@ func (this *Module) Connect() {
 		}
 
 		//保存连接
-		this.instances[name] = Instance{
-			name, config, connect,
-		}
+		inst.connect = connect
 
+		//保存实例
+		this.instances[name] = inst
 	}
 
 	this.connected = true
