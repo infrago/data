@@ -29,6 +29,7 @@ type (
 	Model struct {
 		Name    string `json:"name"`
 		Text    string `json:"text"`
+		Schema  string `json:"schema"`
 		Model   string `json:"model"`
 		Key     string `json:"key"`
 		Fields  Vars   `json:"fields"`
@@ -107,7 +108,7 @@ func (this *Module) ModelConfig(name string) *Model {
 	if config, ok := this.models[name]; ok {
 		//注意：这里应该是复制了一份
 		return &Model{
-			config.Name, config.Text, config.Model,
+			config.Name, config.Text, config.Schema, config.Model,
 			config.Key, config.Fields, config.Setting,
 		}
 		return &config

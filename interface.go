@@ -39,6 +39,9 @@ func (this *Module) configure(name string, config Map) {
 	if url, ok := config["url"].(string); ok {
 		cfg.Url = url
 	}
+	if schema, ok := config["schema"].(string); ok {
+		cfg.Schema = schema
+	}
 	if serial, ok := config["serial"].(string); ok {
 		cfg.Serial = serial
 	}

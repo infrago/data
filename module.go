@@ -46,6 +46,7 @@ type (
 	Config  struct {
 		Driver  string
 		Url     string
+		Schema  string
 		Serial  string
 		Setting Map
 	}
