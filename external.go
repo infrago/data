@@ -2,6 +2,7 @@ package data
 
 import (
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 //------ data group -------
@@ -39,7 +40,7 @@ func ParseSQL(args ...Any) (string, []Any, string, error) {
 
 // 接收回来触发器
 func Trigger(name string, values ...Map) {
-	//待处理，接入infra，或是提供其它方向的 代理
+	infra.Toggle(name, values...)
 }
 
 func Tables() map[string]Table {
