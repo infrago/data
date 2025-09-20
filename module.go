@@ -297,7 +297,8 @@ func (this *Module) parsing(args ...Map) ([]string, []interface{}, []string) {
 					} else if opKey == ANY {
 
 						//ANY要支持 传过来数组的情况，这样相当于，2个数组对比，只要包含任意就匹配
-						//相当于CON, CONY的 或版本，CON,CONBY是与，要全部包含才匹配
+						//相当于CON, CONBY的 或版本，CON,CONBY是与，要全部包含才匹配
+						//OVERLAP交集，交叉只要有任何一个就可以匹配
 						isArray := false
 						switch opVal.(type) {
 						case []string, []int, []int64, []float32, []float64, []bool:
@@ -385,6 +386,70 @@ func (this *Module) parsing(args ...Map) ([]string, []interface{}, []string) {
 								opAnds = append(opAnds, fmt.Sprintf(`1 = 2`))
 							}
 
+						}
+
+					} else if opKey == OVERLAP {
+						// array contains array @>
+
+						conArgs := []string{}
+						conVals := []Any{}
+						switch vs := opVal.(type) {
+
+						case int:
+							conArgs = append(conArgs, "?::int8")
+							conVals = append(conVals, vs)
+						case []int:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::int8")
+								conVals = append(conVals, v)
+							}
+						case int64:
+							conArgs = append(conArgs, "?::int8")
+							conVals = append(conVals, vs)
+						case []int64:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::int8")
+								conVals = append(conVals, v)
+							}
+						case float64:
+							conArgs = append(conArgs, "?::float8")
+							conVals = append(conVals, vs)
+						case []float64:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::float8")
+								conVals = append(conVals, v)
+							}
+						case string:
+							conArgs = append(conArgs, "?::text")
+							conVals = append(conVals, vs)
+						case []string:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::text")
+								conVals = append(conVals, v)
+							}
+						case []bool:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::boolean")
+								conVals = append(conVals, v)
+							}
+						case []Any:
+							for _, v := range vs {
+								conArgs = append(conArgs, "?::text")
+								conVals = append(conVals, fmt.Sprintf("%v", v))
+							}
+						default:
+							conArgs = append(conArgs, "?::text")
+							conVals = append(conVals, fmt.Sprintf("%v", vs))
+						}
+
+						if len(conArgs) > 0 && len(conVals) > 0 {
+							opAnds = append(opAnds, fmt.Sprintf(`%s && ARRAY[%s]`, k, strings.Join(conArgs, ",")))
+							for _, v := range conVals {
+								values = append(values, v)
+							}
+						} else {
+							//为了当前节的and匹配不上数组，因为可能是空数组
+							opAnds = append(opAnds, fmt.Sprintf(`1 = 2`))
 						}
 
 					} else if opKey == CON {
