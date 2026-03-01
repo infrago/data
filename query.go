@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 type (

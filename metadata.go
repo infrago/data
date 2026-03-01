@@ -3,7 +3,7 @@ package data
 import (
 	"strings"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 func lookupField(fields Vars, path string) (Var, bool) {

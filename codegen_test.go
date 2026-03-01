@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 func TestGenerateTableKeys(t *testing.T) {

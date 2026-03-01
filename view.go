@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bamgoo/bamgoo"
-	. "github.com/bamgoo/base"
+	"github.com/infrago/infra"
+	. "github.com/infrago/base"
 )
 
 type sqlView struct {
@@ -254,12 +254,12 @@ func (v *sqlView) Scan(next ScanFunc, args ...Any) Res {
 
 func (v *sqlView) ScanN(limit int64, next ScanFunc, args ...Any) Res {
 	if next == nil || limit < 0 {
-		return bamgoo.Fail
+		return infra.Fail
 	}
 
 	q, err := ParseQuery(args...)
 	if err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 	if limit > 0 {
 		q.Limit = limit
@@ -282,7 +282,7 @@ func (v *sqlView) ScanN(limit int64, next ScanFunc, args ...Any) Res {
 			qq.Limit = chunk
 			items, err := v.queryWithQuery(qq)
 			if err != nil {
-				return bamgoo.Fail.With(err.Error())
+				return infra.Fail.With(err.Error())
 			}
 			for _, item := range items {
 				if res := next(item); res != nil && res.Fail() {
@@ -301,12 +301,12 @@ func (v *sqlView) ScanN(limit int64, next ScanFunc, args ...Any) Res {
 			}
 		}
 		v.base.setError(nil)
-		return bamgoo.OK
+		return infra.OK
 	}
 
 	res := v.streamWithQuery(q, next)
 	if res == nil {
-		return bamgoo.OK
+		return infra.OK
 	}
 	return res
 }
@@ -501,18 +501,18 @@ func (v *sqlView) queryWithQuery(q Query) ([]Map, error) {
 
 func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 	if err := v.applyAfter(&q); err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 
 	builder := NewSQLBuilder(v.base.conn.Dialect())
 	v.bindBuilder(builder, q)
 	from, joins, err := v.buildFrom(q, builder)
 	if err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 	where, params, err := builder.CompileWhere(q)
 	if err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 
 	selectExpr := "*"
@@ -521,7 +521,7 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 		for _, agg := range q.Aggs {
 			expr, err := compileAgg(v.base.conn.Dialect(), agg)
 			if err != nil {
-				return bamgoo.Fail.With(err.Error())
+				return infra.Fail.With(err.Error())
 			}
 			parts = append(parts, expr+" AS "+v.base.conn.Dialect().Quote(agg.Alias))
 		}
@@ -543,7 +543,7 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 		if q.Having != nil {
 			havingSQL, err := builder.CompileExpr(q.Having)
 			if err != nil {
-				return bamgoo.Fail.With(err.Error())
+				return infra.Fail.With(err.Error())
 			}
 			params = builder.Args()
 			sqlText += " HAVING " + havingSQL
@@ -551,7 +551,7 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 	}
 	orderBy, err := v.buildOrderBy(q)
 	if err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 	sqlText += orderBy
 	sqlText += BuildLimitOffset(q, len(params)+1, v.base.conn.Dialect(), &params)
@@ -563,14 +563,14 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 	rows, err := v.base.currentExec().QueryContext(ctx, sqlText, toInterfaces(params)...)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return bamgoo.Fail.With(wrapErr(v.name+".range.query", ErrInvalidQuery, classifySQLError(err)).Error())
+		return infra.Fail.With(wrapErr(v.name+".range.query", ErrInvalidQuery, classifySQLError(err)).Error())
 	}
 	defer rows.Close()
 	v.base.logSlow(sqlText, params, start)
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return bamgoo.Fail.With(err.Error())
+		return infra.Fail.With(err.Error())
 	}
 
 	for rows.Next() {
@@ -580,7 +580,7 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return bamgoo.Fail.With(err.Error())
+			return infra.Fail.With(err.Error())
 		}
 		item := Map{}
 		for i, col := range cols {
@@ -596,7 +596,7 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 		if len(q.Aggs) == 0 && len(q.Group) == 0 {
 			decoded, err := v.decode(item)
 			if err != nil {
-				return bamgoo.Fail.With(err.Error())
+				return infra.Fail.With(err.Error())
 			}
 			item = decoded
 		}
@@ -608,10 +608,10 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 
 	if err := rows.Err(); err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return bamgoo.Fail.With(wrapErr(v.name+".range.rows", ErrInvalidQuery, classifySQLError(err)).Error())
+		return infra.Fail.With(wrapErr(v.name+".range.rows", ErrInvalidQuery, classifySQLError(err)).Error())
 	}
 	statsFor(v.base.inst.Name).Queries.Add(1)
-	return bamgoo.OK
+	return infra.OK
 }
 
 func (v *sqlView) cacheSQL(sqlText string, q Query) string {
@@ -808,7 +808,7 @@ func (v *sqlView) decode(item Map) (Map, error) {
 		return item, nil
 	}
 	out := Map{}
-	res := bamgoo.Mapping(v.fields, item, out, false, true)
+	res := infra.Mapping(v.fields, item, out, false, true)
 	if res != nil && res.Fail() {
 		return nil, fmt.Errorf("decode %s failed: %s", v.name, res.Error())
 	}

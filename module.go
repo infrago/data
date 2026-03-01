@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bamgoo/bamgoo"
-	. "github.com/bamgoo/base"
+	"github.com/infrago/infra"
+	. "github.com/infrago/base"
 )
 
 func init() {
-	host = bamgoo.Mount(module)
+	host = infra.Mount(module)
 	registerCacheSyncService(host)
 }
 
@@ -29,7 +29,7 @@ var module = &Module{
 	dispatchers: make(map[string]*changeDispatcher, 0),
 }
 
-var host bamgoo.Host
+var host infra.Host
 
 type (
 	Module struct {
@@ -110,12 +110,12 @@ func (m *Module) RegisterDriver(name string, driver Driver) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	if name == "" {
-		name = bamgoo.DEFAULT
+		name = infra.DEFAULT
 	}
 	if driver == nil {
 		panic(errInvalidDriver)
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.drivers[name] = driver
 	} else if _, ok := m.drivers[name]; !ok {
 		m.drivers[name] = driver
@@ -126,9 +126,9 @@ func (m *Module) RegisterConfig(name string, cfg Config) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	if name == "" {
-		name = bamgoo.DEFAULT
+		name = infra.DEFAULT
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.configs[name] = cfg
 	} else if _, ok := m.configs[name]; !ok {
 		m.configs[name] = cfg
@@ -151,7 +151,7 @@ func (m *Module) RegisterTable(name string, table Table) {
 	if table.Key == "" {
 		table.Key = "id"
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.tables[name] = table
 	} else if _, ok := m.tables[name]; !ok {
 		m.tables[name] = table
@@ -168,7 +168,7 @@ func (m *Module) RegisterView(name string, view View) {
 	if view.Key == "" {
 		view.Key = "id"
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.views[name] = view
 	} else if _, ok := m.views[name]; !ok {
 		m.views[name] = view
@@ -185,7 +185,7 @@ func (m *Module) RegisterModel(name string, model Model) {
 	if model.Key == "" {
 		model.Key = "id"
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.models[name] = model
 	} else if _, ok := m.models[name]; !ok {
 		m.models[name] = model
@@ -211,7 +211,7 @@ func (m *Module) Config(global Map) {
 		}
 	}
 	if len(root) > 0 {
-		m.configure(bamgoo.DEFAULT, root)
+		m.configure(infra.DEFAULT, root)
 	}
 }
 
@@ -219,7 +219,7 @@ func (m *Module) configure(name string, cfg Map) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	out := Config{Driver: bamgoo.DEFAULT}
+	out := Config{Driver: infra.DEFAULT}
 	if vv, ok := m.configs[name]; ok {
 		out = vv
 	}
@@ -419,15 +419,15 @@ func (m *Module) Setup() {
 		return
 	}
 	if len(m.configs) == 0 {
-		m.configs[bamgoo.DEFAULT] = Config{Driver: bamgoo.DEFAULT}
+		m.configs[infra.DEFAULT] = Config{Driver: infra.DEFAULT}
 	}
 	for name, cfg := range m.configs {
 		if name == "" {
 			delete(m.configs, name)
-			name = bamgoo.DEFAULT
+			name = infra.DEFAULT
 		}
 		if cfg.Driver == "" {
-			cfg.Driver = bamgoo.DEFAULT
+			cfg.Driver = infra.DEFAULT
 		}
 		if strings.TrimSpace(cfg.Schema) == "" {
 			if schema := defaultSchemaByDriver(cfg.Driver); schema != "" {
@@ -526,7 +526,7 @@ func (m *Module) Start() {
 				if err := db.Error(); err != nil {
 					panic(fmt.Sprintf("data migrate(auto) failed on %s: %v", target.name, err))
 				}
-				fmt.Printf("bamgoo data migrate(auto) done on %s.\n", target.name)
+				fmt.Printf("infrago data migrate(auto) done on %s.\n", target.name)
 			case "check":
 				report := db.MigrateDiff()
 				if err := db.Error(); err != nil {
@@ -535,12 +535,12 @@ func (m *Module) Start() {
 				if len(report.Actions) > 0 {
 					panic(fmt.Sprintf("data migrate(check) drift detected on %s: %d actions", target.name, len(report.Actions)))
 				}
-				fmt.Printf("bamgoo data migrate(check) passed on %s.\n", target.name)
+				fmt.Printf("infrago data migrate(check) passed on %s.\n", target.name)
 			}
 		}()
 	}
 
-	fmt.Printf("bamgoo data module is running with %d connections.\n", len(targets))
+	fmt.Printf("infrago data module is running with %d connections.\n", len(targets))
 }
 
 func resolveMigrateStartup(startup string) string {
@@ -548,7 +548,7 @@ func resolveMigrateStartup(startup string) string {
 	if mode != "role" {
 		return mode
 	}
-	role := strings.ToLower(strings.TrimSpace(os.Getenv("BAMGOO_ROLE")))
+	role := strings.ToLower(strings.TrimSpace(os.Getenv("INFRAGO_ROLE")))
 	switch role {
 	case "migrator", "migration", "migrate", "schema", "schema-migrator":
 		return "auto"

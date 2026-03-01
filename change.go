@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bamgoo/bamgoo"
-	. "github.com/bamgoo/base"
+	"github.com/infrago/infra"
+	. "github.com/infrago/base"
 )
 
 const (
@@ -105,7 +105,7 @@ func (m *Module) RegisterWatcher(name string, watcher Watcher) {
 	if m.watchers == nil {
 		m.watchers = make(map[string]Watcher, 0)
 	}
-	if bamgooOverrideEnabled() {
+	if infragoOverrideEnabled() {
 		m.watchers[name] = watcher
 	} else if _, ok := m.watchers[name]; !ok {
 		m.watchers[name] = watcher
@@ -325,8 +325,8 @@ func matchPattern(pattern, value string) bool {
 	return ok
 }
 
-func bamgooOverrideEnabled() bool {
-	return bamgoo.Override()
+func infragoOverrideEnabled() bool {
+	return infra.Override()
 }
 
 func EmitMutation(base, table, op string, rows int64, key Any, data Map, where Map) {

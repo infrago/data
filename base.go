@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bamgoo/bamgoo"
-	. "github.com/bamgoo/base"
+	"github.com/infrago/infra"
+	. "github.com/infrago/base"
 )
 
 type (
@@ -154,7 +154,7 @@ func (m *Module) Base(names ...string) DataBase {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	name := bamgoo.DEFAULT
+	name := infra.DEFAULT
 	if len(names) > 0 && strings.TrimSpace(names[0]) != "" {
 		name = names[0]
 	}
@@ -811,7 +811,7 @@ func (b *sqlBase) acquireMigrateLock(opts MigrateOptions) (func(), error) {
 	dn := strings.ToLower(b.conn.Dialect().Name())
 	switch {
 	case dn == "pgsql" || dn == "postgres":
-		key := int64(fnvHash("bamgoo:migrate:" + b.inst.Name))
+		key := int64(fnvHash("infrago:migrate:" + b.inst.Name))
 		for {
 			var ok bool
 			err := b.currentExec().QueryRowContext(context.Background(), "SELECT pg_try_advisory_lock($1)", key).Scan(&ok)
@@ -827,7 +827,7 @@ func (b *sqlBase) acquireMigrateLock(opts MigrateOptions) (func(), error) {
 			time.Sleep(200*time.Millisecond + b.migrateJitter(opts, 1))
 		}
 	case strings.Contains(dn, "mysql"):
-		lockName := "bamgoo:data:migrate:" + b.inst.Name
+		lockName := "infrago:data:migrate:" + b.inst.Name
 		for {
 			var ok int
 			err := b.currentExec().QueryRowContext(context.Background(), "SELECT GET_LOCK(?, 0)", lockName).Scan(&ok)
@@ -1369,7 +1369,7 @@ func mapCreate(fields Vars, val Map) (Map, error) {
 		return out, nil
 	}
 	out := Map{}
-	res := bamgoo.Mapping(fields, val, out, false, false)
+	res := infra.Mapping(fields, val, out, false, false)
 	if res != nil && res.Fail() {
 		return nil, errors.New(res.Error())
 	}
@@ -1385,7 +1385,7 @@ func mapChange(fields Vars, val Map) (Map, error) {
 		return out, nil
 	}
 	out := Map{}
-	res := bamgoo.Mapping(fields, val, out, true, false)
+	res := infra.Mapping(fields, val, out, true, false)
 	if res != nil && res.Fail() {
 		return nil, wrapErr("map.change", ErrInvalidUpdate, fmt.Errorf("%s", res.Error()))
 	}
@@ -1666,9 +1666,9 @@ func migrateSignature(cfg Table) string {
 }
 
 func (b *sqlBase) ensureMigrateMetaTable() error {
-	sqlText := "CREATE TABLE IF NOT EXISTS _bamgoo_migrations (name TEXT PRIMARY KEY, signature TEXT NOT NULL, updated_at TIMESTAMP NOT NULL)"
+	sqlText := "CREATE TABLE IF NOT EXISTS _infrago_migrations (name TEXT PRIMARY KEY, signature TEXT NOT NULL, updated_at TIMESTAMP NOT NULL)"
 	if strings.Contains(strings.ToLower(b.conn.Dialect().Name()), "mysql") {
-		sqlText = "CREATE TABLE IF NOT EXISTS _bamgoo_migrations (`name` VARCHAR(191) PRIMARY KEY, `signature` VARCHAR(64) NOT NULL, `updated_at` TIMESTAMP NOT NULL)"
+		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migrations (`name` VARCHAR(191) PRIMARY KEY, `signature` VARCHAR(64) NOT NULL, `updated_at` TIMESTAMP NOT NULL)"
 	}
 	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
 	return err
@@ -1676,7 +1676,7 @@ func (b *sqlBase) ensureMigrateMetaTable() error {
 
 func (b *sqlBase) migrateAlreadyApplied(name, signature string) (bool, error) {
 	d := b.conn.Dialect()
-	query := "SELECT signature FROM _bamgoo_migrations WHERE " + d.Quote("name") + " = " + d.Placeholder(1)
+	query := "SELECT signature FROM _infrago_migrations WHERE " + d.Quote("name") + " = " + d.Placeholder(1)
 	var current string
 	err := b.currentExec().QueryRowContext(context.Background(), query, name).Scan(&current)
 	if err == sql.ErrNoRows {
@@ -1693,18 +1693,18 @@ func (b *sqlBase) markMigrated(name, signature string) error {
 	now := time.Now()
 	if d == "pgsql" || d == "postgres" {
 		_, err := b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migrations(name,signature,updated_at) VALUES($1,$2,$3) ON CONFLICT(name) DO UPDATE SET signature=EXCLUDED.signature, updated_at=EXCLUDED.updated_at",
+			"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES($1,$2,$3) ON CONFLICT(name) DO UPDATE SET signature=EXCLUDED.signature, updated_at=EXCLUDED.updated_at",
 			name, signature, now)
 		return err
 	}
 	if d == "sqlite" {
 		_, err := b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migrations(name,signature,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET signature=excluded.signature, updated_at=excluded.updated_at",
+			"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET signature=excluded.signature, updated_at=excluded.updated_at",
 			name, signature, now)
 		return err
 	}
 	_, err := b.currentExec().ExecContext(context.Background(),
-		"INSERT INTO _bamgoo_migrations(name,signature,updated_at) VALUES(?,?,?) ON DUPLICATE KEY UPDATE signature=VALUES(signature), updated_at=VALUES(updated_at)",
+		"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES(?,?,?) ON DUPLICATE KEY UPDATE signature=VALUES(signature), updated_at=VALUES(updated_at)",
 		name, signature, now)
 	return err
 }
@@ -1877,16 +1877,16 @@ func (b *sqlBase) runVersionedDownTo(target string) error {
 }
 
 func (b *sqlBase) ensureVersionMigrateTable() error {
-	sqlText := "CREATE TABLE IF NOT EXISTS _bamgoo_migrations_v2 (version TEXT PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMP NOT NULL)"
+	sqlText := "CREATE TABLE IF NOT EXISTS _infrago_migrations_v2 (version TEXT PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMP NOT NULL)"
 	if strings.Contains(strings.ToLower(b.conn.Dialect().Name()), "mysql") {
-		sqlText = "CREATE TABLE IF NOT EXISTS _bamgoo_migrations_v2 (`version` VARCHAR(191) PRIMARY KEY, `name` VARCHAR(255) NOT NULL, `checksum` VARCHAR(64) NOT NULL, `applied_at` TIMESTAMP NOT NULL)"
+		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migrations_v2 (`version` VARCHAR(191) PRIMARY KEY, `name` VARCHAR(255) NOT NULL, `checksum` VARCHAR(64) NOT NULL, `applied_at` TIMESTAMP NOT NULL)"
 	}
 	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
 	return err
 }
 
 func (b *sqlBase) loadVersionApplied() (map[string]string, error) {
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version, checksum FROM _bamgoo_migrations_v2")
+	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version, checksum FROM _infrago_migrations_v2")
 	if err != nil {
 		return nil, err
 	}
@@ -1903,7 +1903,7 @@ func (b *sqlBase) loadVersionApplied() (map[string]string, error) {
 }
 
 func (b *sqlBase) loadVersionAppliedOrderedDesc() ([]string, error) {
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version FROM _bamgoo_migrations_v2 ORDER BY applied_at DESC, version DESC")
+	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version FROM _infrago_migrations_v2 ORDER BY applied_at DESC, version DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -1925,37 +1925,37 @@ func (b *sqlBase) markVersionApplied(mg Migration) error {
 	c := mg.checksum()
 	if d == "pgsql" || d == "postgres" {
 		_, err := b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migrations_v2(version,name,checksum,applied_at) VALUES($1,$2,$3,$4) ON CONFLICT(version) DO UPDATE SET name=EXCLUDED.name, checksum=EXCLUDED.checksum, applied_at=EXCLUDED.applied_at",
+			"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES($1,$2,$3,$4) ON CONFLICT(version) DO UPDATE SET name=EXCLUDED.name, checksum=EXCLUDED.checksum, applied_at=EXCLUDED.applied_at",
 			mg.Version, mg.Name, c, now)
 		return err
 	}
 	if d == "sqlite" {
 		_, err := b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, checksum=excluded.checksum, applied_at=excluded.applied_at",
+			"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, checksum=excluded.checksum, applied_at=excluded.applied_at",
 			mg.Version, mg.Name, c, now)
 		return err
 	}
 	_, err := b.currentExec().ExecContext(context.Background(),
-		"INSERT INTO _bamgoo_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), checksum=VALUES(checksum), applied_at=VALUES(applied_at)",
+		"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), checksum=VALUES(checksum), applied_at=VALUES(applied_at)",
 		mg.Version, mg.Name, c, now)
 	return err
 }
 
 func (b *sqlBase) unmarkVersionApplied(version string) error {
-	_, err := b.currentExec().ExecContext(context.Background(), "DELETE FROM _bamgoo_migrations_v2 WHERE version = ?", version)
+	_, err := b.currentExec().ExecContext(context.Background(), "DELETE FROM _infrago_migrations_v2 WHERE version = ?", version)
 	if strings.ToLower(b.conn.Dialect().Name()) == "pgsql" || strings.ToLower(b.conn.Dialect().Name()) == "postgres" {
-		_, err = b.currentExec().ExecContext(context.Background(), "DELETE FROM _bamgoo_migrations_v2 WHERE version = $1", version)
+		_, err = b.currentExec().ExecContext(context.Background(), "DELETE FROM _infrago_migrations_v2 WHERE version = $1", version)
 	}
 	return err
 }
 
 func (b *sqlBase) ensureMigrationLogTable() error {
-	sqlText := "CREATE TABLE IF NOT EXISTS _bamgoo_migration_logs (id BIGINT PRIMARY KEY, kind TEXT NOT NULL, version TEXT, name TEXT, success BOOLEAN NOT NULL, cost_ms BIGINT NOT NULL, message TEXT, node TEXT, created_at TIMESTAMP NOT NULL)"
+	sqlText := "CREATE TABLE IF NOT EXISTS _infrago_migration_logs (id BIGINT PRIMARY KEY, kind TEXT NOT NULL, version TEXT, name TEXT, success BOOLEAN NOT NULL, cost_ms BIGINT NOT NULL, message TEXT, node TEXT, created_at TIMESTAMP NOT NULL)"
 	dn := strings.ToLower(b.conn.Dialect().Name())
 	if strings.Contains(dn, "sqlite") {
-		sqlText = "CREATE TABLE IF NOT EXISTS _bamgoo_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, version TEXT, name TEXT, success INTEGER NOT NULL, cost_ms INTEGER NOT NULL, message TEXT, node TEXT, created_at DATETIME NOT NULL)"
+		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migration_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, version TEXT, name TEXT, success INTEGER NOT NULL, cost_ms INTEGER NOT NULL, message TEXT, node TEXT, created_at DATETIME NOT NULL)"
 	} else if strings.Contains(dn, "mysql") {
-		sqlText = "CREATE TABLE IF NOT EXISTS _bamgoo_migration_logs (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `kind` VARCHAR(64) NOT NULL, `version` VARCHAR(191), `name` VARCHAR(255), `success` TINYINT(1) NOT NULL, `cost_ms` BIGINT NOT NULL, `message` TEXT, `node` VARCHAR(255), `created_at` TIMESTAMP NOT NULL)"
+		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migration_logs (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `kind` VARCHAR(64) NOT NULL, `version` VARCHAR(191), `name` VARCHAR(255), `success` TINYINT(1) NOT NULL, `cost_ms` BIGINT NOT NULL, `message` TEXT, `node` VARCHAR(255), `created_at` TIMESTAMP NOT NULL)"
 	}
 	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
 	return err
@@ -2083,11 +2083,11 @@ func (b *sqlBase) logMigrationEvent(kind, version, name string, success bool, co
 	switch {
 	case dn == "pgsql" || dn == "postgres":
 		_, _ = b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
 			kind, version, name, success, costMS, msg, node, now)
 	case strings.Contains(dn, "mysql"):
 		_, _ = b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
+			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
 			kind, version, name, success, costMS, msg, node, now)
 	default:
 		ok := 0
@@ -2095,7 +2095,7 @@ func (b *sqlBase) logMigrationEvent(kind, version, name string, success bool, co
 			ok = 1
 		}
 		_, _ = b.currentExec().ExecContext(context.Background(),
-			"INSERT INTO _bamgoo_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
+			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
 			kind, version, name, ok, costMS, msg, node, now)
 	}
 }
@@ -2154,9 +2154,9 @@ func (t *invalidTable) Count(...Any) int64             { return 0 }
 func (t *invalidTable) Aggregate(...Any) []Map         { return nil }
 func (t *invalidTable) First(...Any) Map               { return nil }
 func (t *invalidTable) Query(...Any) []Map             { return nil }
-func (t *invalidTable) Scan(ScanFunc, ...Any) Res      { return bamgoo.Fail.With(t.err.Error()) }
+func (t *invalidTable) Scan(ScanFunc, ...Any) Res      { return infra.Fail.With(t.err.Error()) }
 func (t *invalidTable) ScanN(int64, ScanFunc, ...Any) Res {
-	return bamgoo.Fail.With(t.err.Error())
+	return infra.Fail.With(t.err.Error())
 }
 func (t *invalidTable) Slice(int64, int64, ...Any) (int64, []Map) { return 0, nil }
 func (t *invalidTable) Group(string, ...Any) []Map                { return nil }

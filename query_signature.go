@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 func QuerySignature(q Query) string {

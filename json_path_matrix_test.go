@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 type testDialect struct {

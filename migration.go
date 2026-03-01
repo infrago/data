@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bamgoo/bamgoo"
+	"github.com/infrago/infra"
 )
 
 type Migration struct {
@@ -43,7 +43,7 @@ func (m *Module) RegisterMigration(name string, migration Migration) {
 	if strings.TrimSpace(key) == "" {
 		key = migration.Version
 	}
-	if bamgoo.Override() {
+	if infra.Override() {
 		m.migrations[key] = migration
 	} else if _, ok := m.migrations[key]; !ok {
 		m.migrations[key] = migration

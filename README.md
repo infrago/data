@@ -1,6 +1,6 @@
 # data
 
-bamgoo data module with Mongo-like `Map` query DSL and SQL drivers.
+infrago data module with Mongo-like `Map` query DSL and SQL drivers.
 
 ## Naming Mapping
 

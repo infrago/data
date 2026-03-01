@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bamgoo/bamgoo"
-	. "github.com/bamgoo/base"
+	"github.com/infrago/infra"
+	. "github.com/infrago/base"
 )
 
 type moduleStats struct {
@@ -269,7 +269,7 @@ func cacheSetTableVersion(name, table string, target uint64) uint64 {
 }
 
 func cacheBroadcastInvalidate(name, table string, ver uint64) {
-	_ = bamgoo.Broadcast(cacheInvalidateTopic, Map{
+	_ = infra.Broadcast(cacheInvalidateTopic, Map{
 		"base":  name,
 		"table": table,
 		"ver":   ver,
@@ -425,12 +425,12 @@ func cacheInvalidateTable(name, table string) {
 	})
 }
 
-func registerCacheSyncService(h bamgoo.Host) {
+func registerCacheSyncService(h infra.Host) {
 	cacheSyncOnce.Do(func() {
-		service := bamgoo.Service{
+		service := infra.Service{
 			Name: "数据缓存失效同步",
 			Desc: "内部服务：同步数据查询缓存按表失效事件",
-			Action: func(ctx *bamgoo.Context) {
+			Action: func(ctx *infra.Context) {
 				baseName, _ := ctx.Value["base"].(string)
 				table, _ := ctx.Value["table"].(string)
 				if strings.TrimSpace(baseName) == "" || strings.TrimSpace(table) == "" {
@@ -447,7 +447,7 @@ func registerCacheSyncService(h bamgoo.Host) {
 			h.RegisterLocal(cacheInvalidateTopic, service)
 			return
 		}
-		bamgoo.Register(cacheInvalidateTopic, service)
+		infra.Register(cacheInvalidateTopic, service)
 	})
 }
 

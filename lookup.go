@@ -3,7 +3,7 @@ package data
 import (
 	"fmt"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 func (m *Module) tableConfig(base, name string) (Table, error) {

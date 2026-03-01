@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 const queryCompileCacheCapacity = 2048

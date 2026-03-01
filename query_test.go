@@ -3,7 +3,7 @@ package data
 import (
 	"testing"
 
-	. "github.com/bamgoo/base"
+	. "github.com/infrago/base"
 )
 
 func TestParseQueryUnsafe(t *testing.T) {
