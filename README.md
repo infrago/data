@@ -1,80 +1,60 @@
 # data
 
-`data` 是 infrago 的模块包。
+`data` 是 infrago 的**模块**。
 
-## 安装
+## 包定位
 
-```bash
-go get github.com/infrago/data@latest
-```
+- 类型：模块
+- 作用：统一数据访问模块，负责 SQL/Mongo 风格查询抽象。
 
-## 最小接入
+## 主要功能
+
+- 对上提供统一模块接口
+- 对下通过驱动接口接入具体后端
+- 支持按配置切换驱动实现
+
+## 快速接入
 
 ```go
-package main
-
-import (
-    _ "github.com/infrago/data"
-    "github.com/infrago/infra"
-)
-
-func main() {
-    infra.Run()
-}
+import _ "github.com/infrago/data"
 ```
-
-## 配置示例
 
 ```toml
 [data]
 driver = "default"
 ```
 
-## 公开 API（摘自源码）
+## 驱动实现接口列表
 
-- `func ParseQuery(args ...Any) (Query, error)`
-- `func Ref(field string) FieldRef { return FieldRef(strings.TrimSpace(field)) }`
-- `func (e *DataError) Error() string`
-- `func (e *DataError) Unwrap() error`
-- `func (e *DataError) Is(target error) bool`
-- `func Error(op string, code error, err error) error`
-- `func ErrorKind(err error) string`
-- `func QuerySignature(q Query) string`
-- `func (m *Module) Stats(names ...string) Stats`
-- `func CacheToken(name string, tables []string) string`
-- `func TouchTableCache(name, table string) uint64`
-- `func (m *Module) Tables() map[string]Table`
-- `func (m *Module) Views() map[string]View`
-- `func (m *Module) Models() map[string]Model`
-- `func (m *Module) TableConfig(name string) *Table`
-- `func (m *Module) ViewConfig(name string) *View`
-- `func (m *Module) ModelConfig(name string) *Model`
-- `func (m *Module) Field(name, field string, extends ...Any) Var`
-- `func (m *Module) Fields(name string, keys []string, extends ...Vars) Vars`
-- `func (m *Module) Options(name, field string) Map`
-- `func (m *Module) Option(name, field, key string) Any`
-- `func SnakeFieldPath(field string) string`
-- `func CamelFieldPath(field string) string`
-- `func (v *sqlView) Count(args ...Any) int64`
-- `func (v *sqlView) First(args ...Any) Map`
-- `func (v *sqlView) Query(args ...Any) []Map`
-- `func (v *sqlView) Aggregate(args ...Any) []Map`
-- `func (v *sqlView) Scan(next ScanFunc, args ...Any) Res`
-- `func (v *sqlView) ScanN(limit int64, next ScanFunc, args ...Any) Res`
-- `func (v *sqlView) Slice(offset, limit int64, args ...Any) (int64, []Map)`
-- `func (v *sqlView) Group(field string, args ...Any) []Map`
-- `func (m *Module) Base(names ...string) DataBase`
-- `func (b *sqlBase) Close() error`
-- `func (b *sqlBase) WithContext(ctx context.Context) DataBase`
-- `func (b *sqlBase) WithTimeout(timeout time.Duration) DataBase`
-- `func (b *sqlBase) Error() error`
-- `func (b *sqlBase) ClearError()`
-- `func (b *sqlBase) Begin() error`
-- `func (b *sqlBase) Commit() error`
-- `func (b *sqlBase) Rollback() error`
+以下接口由驱动实现（来自模块 `driver.go`）：
 
-## 排错
+### Driver
 
-- 模块未运行：确认空导入已存在
-- driver 无效：确认驱动包已引入
-- 配置不生效：检查配置段名是否为 `[data]`
+- `Connect(*Instance) (Connection, error)`
+
+### Connection
+
+- `Open() error`
+- `Close() error`
+- `Health() Health`
+- `DB() *sql.DB`
+- `Dialect() Dialect`
+
+### Dialect
+
+- `Name() string`
+- `Quote(string) string`
+- `Placeholder(int) string`
+- `SupportsILike() bool`
+- `SupportsReturning() bool`
+
+## 全局配置项（所有配置键）
+
+配置段：`[data]`
+
+- 未检测到配置键（请查看模块源码的 configure 逻辑）
+
+## 说明
+
+- `setting` 一般用于向具体驱动透传专用参数
+- 多实例配置请参考模块源码中的 Config/configure 处理逻辑
