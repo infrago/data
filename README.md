@@ -1,208 +1,80 @@
 # data
 
-infrago data module with Mongo-like `Map` query DSL and SQL drivers.
+`data` 是 infrago 的模块包。
 
-## Naming Mapping
+## 安装
 
-Disabled by default. Enable in config to map `camelCase <-> snake_case` automatically.
+```bash
+go get github.com/infrago/data@latest
+```
+
+## 最小接入
+
+```go
+package main
+
+import (
+    _ "github.com/infrago/data"
+    "github.com/infrago/infra"
+)
+
+func main() {
+    infra.Run()
+}
+```
+
+## 配置示例
 
 ```toml
 [data]
-mapping = true
+driver = "default"
 ```
 
-## Query DSL
+## 公开 API（摘自源码）
 
-- compare: `$eq $ne $gt $gte $lt $lte $in $nin`
-- json/array: `$contains $overlap $elemMatch`
-- logic: `$and $or $nor $not`
-- text: `$like $ilike $regex`
-- options: `$select $sort $limit $offset $after $group $having $join $agg $unsafe`
+- `func ParseQuery(args ...Any) (Query, error)`
+- `func Ref(field string) FieldRef { return FieldRef(strings.TrimSpace(field)) }`
+- `func (e *DataError) Error() string`
+- `func (e *DataError) Unwrap() error`
+- `func (e *DataError) Is(target error) bool`
+- `func Error(op string, code error, err error) error`
+- `func ErrorKind(err error) string`
+- `func QuerySignature(q Query) string`
+- `func (m *Module) Stats(names ...string) Stats`
+- `func CacheToken(name string, tables []string) string`
+- `func TouchTableCache(name, table string) uint64`
+- `func (m *Module) Tables() map[string]Table`
+- `func (m *Module) Views() map[string]View`
+- `func (m *Module) Models() map[string]Model`
+- `func (m *Module) TableConfig(name string) *Table`
+- `func (m *Module) ViewConfig(name string) *View`
+- `func (m *Module) ModelConfig(name string) *Model`
+- `func (m *Module) Field(name, field string, extends ...Any) Var`
+- `func (m *Module) Fields(name string, keys []string, extends ...Vars) Vars`
+- `func (m *Module) Options(name, field string) Map`
+- `func (m *Module) Option(name, field, key string) Any`
+- `func SnakeFieldPath(field string) string`
+- `func CamelFieldPath(field string) string`
+- `func (v *sqlView) Count(args ...Any) int64`
+- `func (v *sqlView) First(args ...Any) Map`
+- `func (v *sqlView) Query(args ...Any) []Map`
+- `func (v *sqlView) Aggregate(args ...Any) []Map`
+- `func (v *sqlView) Scan(next ScanFunc, args ...Any) Res`
+- `func (v *sqlView) ScanN(limit int64, next ScanFunc, args ...Any) Res`
+- `func (v *sqlView) Slice(offset, limit int64, args ...Any) (int64, []Map)`
+- `func (v *sqlView) Group(field string, args ...Any) []Map`
+- `func (m *Module) Base(names ...string) DataBase`
+- `func (b *sqlBase) Close() error`
+- `func (b *sqlBase) WithContext(ctx context.Context) DataBase`
+- `func (b *sqlBase) WithTimeout(timeout time.Duration) DataBase`
+- `func (b *sqlBase) Error() error`
+- `func (b *sqlBase) ClearError()`
+- `func (b *sqlBase) Begin() error`
+- `func (b *sqlBase) Commit() error`
+- `func (b *sqlBase) Rollback() error`
 
-## Sort Notes
+## 排错
 
-- Single-field sort: use `Map`
-- Multi-field sort: use `[]Map` to preserve order
-
-```go
-// single-field
-rows1 := db.Table("article").Query(base.Map{
-  "$sort": base.Map{"id": base.DESC},
-})
-_ = rows1
-
-// multi-field (ordered)
-rows2 := db.Table("article").Query(base.Map{
-  "$sort": []base.Map{
-    {"id": base.ASC},
-    {"views": base.DESC},
-  },
-})
-_ = rows2
-```
-
-## Update DSL
-
-- `$set`
-- `$inc`
-- `$unset`
-- `$push`
-- `$pull`
-- `$addToSet`
-- `$setPath`
-- `$unsetPath`
-
-## Driver Notes
-
-- `pgsql`: native support for `$contains/$overlap/$elemMatch` (json/array operators).
-- `mysql`: uses JSON functions for `$contains/$overlap/$elemMatch`.
-- `sqlite`: `$contains` fallback is string-search; `$overlap/$elemMatch` are not supported directly.
-
-## Capabilities
-
-```go
-caps, _ := data.GetCapabilities()
-fmt.Println(caps)
-// {Dialect:sqlite ILike:false Returning:false Join:true ...}
-```
-
-## Join Example
-
-```go
-rows, err := db.View("order").Query(base.Map{
-  "$select": []string{"order.id", "order.amount", "user.name"},
-  "$join": []base.Map{
-    {
-      "from": "user",
-      "alias": "user",
-      "type": "left",
-      "localField": "order.user_id",
-      "foreignField": "user.id",
-    },
-  },
-  "user.status": "active",
-  "$sort": base.Map{"order.id": base.ASC},
-  "$limit": 20,
-})
-_ = rows
-_ = err
-```
-
-## Keyset Pagination (`$after`)
-
-```go
-page1, _ := db.Table("user").Query(base.Map{
-  "$sort": base.Map{"id": base.ASC},
-  "$limit": 20,
-})
-
-page2, _ := db.Table("user").Query(base.Map{
-  "$sort": base.Map{"id": base.ASC},
-  "$after": base.Map{"id": page1[len(page1)-1]["id"]},
-  "$limit": 20,
-})
-```
-
-## Aggregate Example
-
-```go
-rows, _ := db.View("order").Aggregate(base.Map{
-  "status": "paid",
-  "$group": []string{"user_id"},
-  "$agg": base.Map{
-    "total_amount": base.Map{"sum": "amount"},
-    "avg_amount":   base.Map{"avg": "amount"},
-    "cnt":          base.Map{"count": "*"},
-  },
-  "$having": base.Map{
-    "total_amount": base.Map{"$gt": 100},
-  },
-  "$sort": base.Map{"total_amount": base.DESC},
-})
-_ = rows
-```
-
-## Slice (total + items)
-
-```go
-total, items := db.Table("user").Slice(0, 20, base.Map{
-  "status": "active",
-  "$sort": base.Map{"id": base.DESC},
-})
-if db.Error() != nil {
-  return
-}
-_ = total
-_ = items
-```
-
-## Tx / Batch
-
-```go
-_ = db.Tx(func(tx data.DataBase) error {
-  _, err := tx.Table("user").InsertMany([]base.Map{
-    {"name": "A"},
-    {"name": "B"},
-  })
-  return err
-})
-```
-
-## Safety Guard
-
-By default, full-table `Update/Delete` is blocked unless query has filter.
-
-```go
-_, err := db.Table("user").Delete(base.Map{
-  "$unsafe": true,
-})
-_ = err
-```
-
-## Join Field Ref
-
-```go
-rows, _ := db.View("order").Query(base.Map{
-  "$join": []base.Map{
-    {"from": "user", "alias": "u", "on": base.Map{
-      "order.user_id": base.Map{"$eq": "$field:u.id"},
-    }},
-  },
-})
-_ = rows
-```
-
-## JSON/Array Example
-
-```go
-users, _ := db.Table("user").Query(base.Map{
-  "tags": base.Map{"$contains": []string{"go"}},
-  "$sort": base.Map{"id": base.ASC},
-})
-_ = users
-```
-
-## Example
-
-```go
-db := data.Base()
-defer db.Close()
-
-item, _ := db.Table("user").Upsert(base.Map{
-  "$set": base.Map{"name": "Alice"},
-  "$inc": base.Map{"login_times": 1},
-}, base.Map{"id": 1001})
-
-_ = item
-
-rows, _ := db.View("order").Aggregate(base.Map{
-  "$group": []string{"user_id"},
-  "$agg": base.Map{
-    "total": base.Map{"sum": "amount"},
-    "cnt":   base.Map{"count": "*"},
-  },
-  "$having": base.Map{"total": base.Map{"$gt": 100}},
-})
-
-_ = rows
-```
+- 模块未运行：确认空导入已存在
+- driver 无效：确认驱动包已引入
+- 配置不生效：检查配置段名是否为 `[data]`
