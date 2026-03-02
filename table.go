@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	. "github.com/infrago/base"
 )
@@ -275,7 +276,8 @@ func (t *sqlTable) Change(item Map, data Map) Map {
 		return nil
 	}
 
-	assigns, vals, err := t.compileAssignments(data, item, 1)
+	payload := t.withAutoUpdateStamp(data)
+	assigns, vals, err := t.compileAssignments(payload, item, 1)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".change.assign", ErrInvalidUpdate, err))
 		return nil
@@ -301,7 +303,7 @@ func (t *sqlTable) Change(item Map, data Map) Map {
 	for k, v := range item {
 		out[k] = v
 	}
-	setMap, _, _, _, _, _ := t.parseUpdateData(data, item, true)
+	setMap, _, _, _, _, _ := t.parseUpdateData(payload, item, true)
 	for k, v := range setMap {
 		out[k] = v
 	}
@@ -356,6 +358,7 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(err)
 		return 0
 	}
+	payload := t.withAutoUpdateStamp(sets)
 	q, err := ParseQuery(args...)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
@@ -366,12 +369,12 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".update.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe update blocked, set %s=true to allow full-table update", OptUnsafe)))
 		return 0
 	}
-	if t.hasCollectionUpdate(sets) {
-		affected, err := t.updateByEntityLoop(sets, q)
+	if t.hasCollectionUpdate(payload) {
+		affected, err := t.updateByEntityLoop(payload, q)
 		t.base.setError(err)
 		return affected
 	}
-	assign, vals, err := t.compileAssignments(sets, nil, 1)
+	assign, vals, err := t.compileAssignments(payload, nil, 1)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".update.assign", ErrInvalidUpdate, err))
 		return 0
@@ -409,7 +412,7 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".update.rows", ErrInvalidQuery, classifySQLError(err)))
 		return 0
 	}
-	t.base.emitChange(MutationUpdate, t.source, affected, nil, sets, nil)
+	t.base.emitChange(MutationUpdate, t.source, affected, nil, payload, nil)
 	t.base.setError(nil)
 	return affected
 }
@@ -869,6 +872,7 @@ func (t *sqlTable) upsertNative(data Map, condition Map) (Map, error) {
 	for k, v := range data {
 		merged[k] = v
 	}
+	merged = t.withAutoUpdateStamp(merged)
 	if _, ok := merged[conflictKey]; !ok {
 		merged[conflictKey] = conflictVal
 	}
@@ -1037,4 +1041,46 @@ func (t *sqlTable) updateByEntityLoop(sets Map, q Query) (int64, error) {
 		return nil
 	})
 	return affected, err
+}
+
+func (t *sqlTable) withAutoUpdateStamp(input Map) Map {
+	field := t.autoUpdateFieldName()
+	if field == "" {
+		return input
+	}
+	out := Map{}
+	for k, v := range input {
+		out[k] = v
+	}
+	now := time.Now()
+	if rawSet, ok := out[UpdSet].(Map); ok && rawSet != nil {
+		setMap := Map{}
+		for k, v := range rawSet {
+			setMap[k] = v
+		}
+		setMap[field] = now
+		out[UpdSet] = setMap
+		return out
+	}
+	out[field] = now
+	return out
+}
+
+func (t *sqlTable) autoUpdateFieldName() string {
+	if len(t.fields) == 0 {
+		return ""
+	}
+	candidates := []string{"updatedAt", "changed", "updated_at"}
+	for _, name := range candidates {
+		if _, ok := t.fields[name]; ok {
+			return name
+		}
+	}
+	for key := range t.fields {
+		k := strings.ToLower(strings.TrimSpace(key))
+		if k == "updatedat" || k == "changed" || k == "updated_at" {
+			return key
+		}
+	}
+	return ""
 }
