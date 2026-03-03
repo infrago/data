@@ -358,6 +358,38 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(err)
 		return 0
 	}
+	args = t.singleMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q = t.ensureSingleMutationQuery(q)
+	items, err := t.queryWithQuery(q)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".update.query", ErrInvalidQuery, err))
+		return 0
+	}
+	if len(items) == 0 {
+		t.base.setError(nil)
+		return 0
+	}
+	if out := t.Change(items[0], sets); out == nil {
+		if t.base.Error() != nil {
+			t.base.setError(wrapErr(t.name+".update.change", ErrInvalidUpdate, t.base.Error()))
+		}
+		return 0
+	}
+	t.base.setError(nil)
+	return 1
+}
+
+func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
+	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
+		t.base.setError(err)
+		return 0
+	}
 	payload := t.withAutoUpdateStamp(sets)
 	q, err := ParseQuery(args...)
 	if err != nil {
@@ -369,6 +401,12 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".update.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe update blocked, set %s=true to allow full-table update", OptUnsafe)))
 		return 0
 	}
+	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
+	if keyErr != nil {
+		t.base.setError(wrapErr(t.name+".update.keys", ErrInvalidQuery, keyErr))
+		return 0
+	}
+	whereMap := t.queryArgsMap(args...)
 	if t.hasCollectionUpdate(payload) {
 		affected, err := t.updateByEntityLoop(payload, q)
 		t.base.setError(err)
@@ -388,7 +426,7 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 	builder := NewSQLBuilder(d)
 	t.bindBuilder(builder, q)
 	builder.index = len(vals) + 1
-	where, p, err := builder.CompileWhere(q)
+	whereSQL, p, err := builder.CompileWhere(q)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".update.where", ErrInvalidQuery, err))
 		return 0
@@ -397,7 +435,7 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		vals = append(vals, arg)
 	}
 
-	sqlText := fmt.Sprintf("UPDATE %s SET %s WHERE %s", t.base.sourceExpr(t.schema, t.source), strings.Join(assign, ","), where)
+	sqlText := fmt.Sprintf("UPDATE %s SET %s WHERE %s", t.base.sourceExpr(t.schema, t.source), strings.Join(assign, ","), whereSQL)
 	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(vals)...)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
@@ -412,12 +450,66 @@ func (t *sqlTable) Update(sets Map, args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".update.rows", ErrInvalidQuery, classifySQLError(err)))
 		return 0
 	}
-	t.base.emitChange(MutationUpdate, t.source, affected, nil, payload, nil)
+	var key Any
+	if len(keys) > 0 {
+		key = keys[0]
+	}
+	t.base.emitChangeWithKeys(MutationUpdate, t.source, affected, key, keys, payload, whereMap)
 	t.base.setError(nil)
 	return affected
 }
 
 func (t *sqlTable) Delete(args ...Any) int64 {
+	if err := t.base.ensureWritable(t.name + ".delete"); err != nil {
+		t.base.setError(err)
+		return 0
+	}
+	args = t.singleMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".delete.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q = t.ensureSingleMutationQuery(q)
+	items, err := t.queryWithQuery(q)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".delete.query", ErrInvalidQuery, err))
+		return 0
+	}
+	if len(items) == 0 {
+		t.base.setError(nil)
+		return 0
+	}
+	id := items[0][t.key]
+	if id == nil {
+		t.base.setError(wrapErr(t.name+".delete.key", ErrInvalidQuery, fmt.Errorf("missing primary key %s", t.key)))
+		return 0
+	}
+	d := t.base.conn.Dialect()
+	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", t.base.sourceExpr(t.schema, t.source), d.Quote(t.base.storageField(t.key)), d.Placeholder(1))
+	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, id)
+	if err != nil {
+		statsFor(t.base.inst.Name).Errors.Add(1)
+		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, classifySQLError(err)))
+		return 0
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		statsFor(t.base.inst.Name).Errors.Add(1)
+		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, classifySQLError(err)))
+		return 0
+	}
+	if affected > 0 {
+		statsFor(t.base.inst.Name).Writes.Add(1)
+		cacheTouchTable(t.base.inst.Name, t.source)
+		t.base.emitChange(MutationDelete, t.source, affected, id, nil, Map{t.key: id})
+	}
+	t.base.setError(nil)
+	return affected
+}
+
+func (t *sqlTable) DeleteMany(args ...Any) int64 {
 	if err := t.base.ensureWritable(t.name + ".delete"); err != nil {
 		t.base.setError(err)
 		return 0
@@ -432,14 +524,20 @@ func (t *sqlTable) Delete(args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".delete.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe delete blocked, set %s=true to allow full-table delete", OptUnsafe)))
 		return 0
 	}
+	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
+	if keyErr != nil {
+		t.base.setError(wrapErr(t.name+".delete.keys", ErrInvalidQuery, keyErr))
+		return 0
+	}
+	whereMap := t.queryArgsMap(args...)
 	b := NewSQLBuilder(t.base.conn.Dialect())
 	t.bindBuilder(b, q)
-	where, params, err := b.CompileWhere(q)
+	whereSQL, params, err := b.CompileWhere(q)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".delete.where", ErrInvalidQuery, err))
 		return 0
 	}
-	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s", t.base.sourceExpr(t.schema, t.source), where)
+	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s", t.base.sourceExpr(t.schema, t.source), whereSQL)
 	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(params)...)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
@@ -454,9 +552,99 @@ func (t *sqlTable) Delete(args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, classifySQLError(err)))
 		return 0
 	}
-	t.base.emitChange(MutationDelete, t.source, affected, nil, nil, nil)
+	var key Any
+	if len(keys) > 0 {
+		key = keys[0]
+	}
+	t.base.emitChangeWithKeys(MutationDelete, t.source, affected, key, keys, nil, whereMap)
 	t.base.setError(nil)
 	return affected
+}
+
+func (t *sqlTable) ensureSingleMutationQuery(q Query) Query {
+	if len(q.Sort) == 0 {
+		key := strings.TrimSpace(t.base.storageField(t.key))
+		if key != "" {
+			q.Sort = []Sort{{Field: key}}
+		}
+	}
+	q.Offset = 0
+	q.Limit = 1
+	return q
+}
+
+func (t *sqlTable) singleMutationArgs(args ...Any) []Any {
+	id, ok := t.pickPrimaryValue(args...)
+	if !ok {
+		return args
+	}
+	return []Any{Map{t.key: id}}
+}
+
+func (t *sqlTable) pickPrimaryValue(args ...Any) (Any, bool) {
+	if len(args) == 0 {
+		return nil, false
+	}
+	storageKey := t.base.storageField(t.key)
+	for _, arg := range args {
+		m, ok := arg.(Map)
+		if !ok || len(m) == 0 {
+			continue
+		}
+		if v, ok := m[t.key]; ok && v != nil {
+			return v, true
+		}
+		if storageKey != t.key {
+			if v, ok := m[storageKey]; ok && v != nil {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func (t *sqlTable) mutationKeysForQuery(q Query, enabled bool) ([]Any, error) {
+	if !enabled {
+		return nil, nil
+	}
+	qq := q
+	qq.Select = []string{t.key}
+	qq.Offset = 0
+	if len(qq.Sort) == 0 {
+		key := strings.TrimSpace(t.base.storageField(t.key))
+		if key != "" {
+			qq.Sort = []Sort{{Field: key}}
+		}
+	}
+	qq.Limit = 0
+	items, err := t.queryWithQuery(qq)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]Any, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if id, ok := item[t.key]; ok && id != nil {
+			keys = append(keys, id)
+		}
+	}
+	return keys, nil
+}
+
+func (t *sqlTable) queryArgsMap(args ...Any) Map {
+	where := Map{}
+	for _, arg := range args {
+		m, ok := arg.(Map)
+		if !ok {
+			continue
+		}
+		for k, v := range m {
+			where[k] = v
+		}
+	}
+	return where
 }
 
 func (t *sqlTable) Entity(id Any) Map {
@@ -493,8 +681,54 @@ func (t *sqlTable) compileAssignments(input Map, current Map, start int) ([]stri
 		if k == t.key {
 			continue
 		}
+		field := strings.TrimSpace(k)
+		if field == "" {
+			continue
+		}
+		if strings.Contains(field, ".") {
+			parts := strings.Split(field, ".")
+			root := strings.TrimSpace(parts[0])
+			path := make([]string, 0, len(parts)-1)
+			for _, seg := range parts[1:] {
+				seg = strings.TrimSpace(seg)
+				if seg != "" {
+					path = append(path, seg)
+				}
+			}
+			if root != "" && len(path) > 0 && t.isJSONField(root) {
+				segmentPath := strings.Join(path, ".")
+				fieldExpr := d.Quote(t.base.storageField(root))
+				name := strings.ToLower(d.Name())
+				switch {
+				case name == "pgsql" || name == "postgres":
+					vals = append(vals, "{"+strings.Join(path, ",")+"}", v)
+					pathPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					incPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					clauses = append(clauses, fieldExpr+" = jsonb_set(COALESCE("+fieldExpr+", '{}'::jsonb), "+pathPH+"::text[], to_jsonb(COALESCE((COALESCE("+fieldExpr+", '{}'::jsonb)#>>"+pathPH+"::text[])::numeric,0) + "+incPH+"::numeric), true)")
+				case name == "mysql":
+					vals = append(vals, "$."+segmentPath, v)
+					pathPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					incPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					clauses = append(clauses, fieldExpr+" = JSON_SET(COALESCE("+fieldExpr+", JSON_OBJECT()), "+pathPH+", CAST((CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(COALESCE("+fieldExpr+", JSON_OBJECT()), "+pathPH+")), '0') AS DECIMAL(65,10)) + CAST("+incPH+" AS DECIMAL(65,10))) AS JSON))")
+				case name == "sqlite":
+					vals = append(vals, "$."+segmentPath, v)
+					pathPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					incPH := d.Placeholder(placeholderIdx)
+					placeholderIdx++
+					clauses = append(clauses, fieldExpr+" = json_set(COALESCE("+fieldExpr+", '{}'), "+pathPH+", (COALESCE(CAST(json_extract(COALESCE("+fieldExpr+", '{}'), "+pathPH+") AS REAL),0) + CAST("+incPH+" AS REAL)))")
+				default:
+					return nil, nil, wrapErr("update.incPath", ErrUnsupported, fmt.Errorf("dialect %s does not support %s on json path", d.Name(), UpdInc))
+				}
+				continue
+			}
+		}
 		vals = append(vals, v)
-		f := d.Quote(t.base.storageField(k))
+		f := d.Quote(t.base.storageField(field))
 		clauses = append(clauses, f+" = COALESCE("+f+",0) + "+d.Placeholder(placeholderIdx))
 		placeholderIdx++
 	}

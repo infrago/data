@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrago/infra"
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 const (
@@ -15,6 +15,12 @@ const (
 	MutationUpdate = "update"
 	MutationDelete = "delete"
 	MutationUpsert = "upsert"
+
+	// Short op aliases (kept for concise usage).
+	INSERT = MutationInsert
+	UPDATE = MutationUpdate
+	DEL    = MutationDelete
+	UPSERT = MutationUpsert
 )
 
 type (
@@ -60,6 +66,7 @@ type (
 		Op    string    `json:"op"`
 		Rows  int64     `json:"rows"`
 		Key   Any       `json:"key,omitempty"`
+		Keys  []Any     `json:"keys,omitempty"`
 		Data  Map       `json:"data,omitempty"`
 		Where Map       `json:"where,omitempty"`
 		At    time.Time `json:"at"`
@@ -71,6 +78,7 @@ type (
 		Queue    int
 		Overflow string // drop | block
 		Payload  string // minimal | full
+		Keys     bool
 	}
 
 	changeRule struct {
@@ -182,21 +190,11 @@ func (m *Module) parseChangeConfig(cfg Config) changeConfig {
 		Queue:    1024,
 		Overflow: "drop",
 		Payload:  "minimal",
+		Keys:     false,
 	}
 	cm := cfg.Watcher
 	if cm == nil {
 		cm = Map{}
-	}
-	if len(cm) == 0 && cfg.Setting != nil {
-		raw, ok := cfg.Setting["change"]
-		if !ok {
-			raw, ok = cfg.Setting["trigger"]
-		}
-		if ok {
-			if legacy, ok := raw.(Map); ok {
-				cm = legacy
-			}
-		}
 	}
 	if len(cm) == 0 {
 		return cc
@@ -221,6 +219,9 @@ func (m *Module) parseChangeConfig(cfg Config) changeConfig {
 		if v == "minimal" || v == "full" {
 			cc.Payload = v
 		}
+	}
+	if v, ok := parseBool(cm["keys"]); ok {
+		cc.Keys = v
 	}
 	return cc
 }
@@ -329,13 +330,14 @@ func infragoOverrideEnabled() bool {
 	return infra.Override()
 }
 
-func EmitMutation(base, table, op string, rows int64, key Any, data Map, where Map) {
+func EmitMutation(base, table, op string, rows int64, key Any, keys []Any, data Map, where Map) {
 	module.emitChange(Mutation{
 		Base:  base,
 		Table: table,
 		Op:    strings.ToLower(strings.TrimSpace(op)),
 		Rows:  rows,
 		Key:   key,
+		Keys:  keys,
 		Data:  data,
 		Where: where,
 		At:    time.Now(),

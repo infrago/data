@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/infrago/infra"
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 type (
@@ -96,7 +96,9 @@ type (
 		Change(Map, Map) Map
 		Remove(...Any) Map
 		Update(Map, ...Any) int64
+		UpdateMany(Map, ...Any) int64
 		Delete(...Any) int64
+		DeleteMany(...Any) int64
 
 		Entity(Any) Map
 		Count(...Any) int64
@@ -248,13 +250,32 @@ func (b *sqlBase) suppressChange() func() {
 }
 
 func (b *sqlBase) emitChange(op, table string, rows int64, key Any, data Map, where Map) {
+	b.emitChangeWithKeys(op, table, rows, key, nil, data, where)
+}
+
+func (b *sqlBase) emitChangeWithKeys(op, table string, rows int64, key Any, keys []Any, data Map, where Map) {
 	if b == nil || b.inst == nil {
 		return
 	}
 	if b.mute.Load() > 0 {
 		return
 	}
-	EmitMutation(b.inst.Name, table, op, rows, key, data, where)
+	if !b.watcherKeysEnabled() {
+		keys = nil
+	} else if len(keys) == 0 && key != nil {
+		keys = []Any{key}
+	}
+	EmitMutation(b.inst.Name, table, op, rows, key, keys, data, where)
+}
+
+func (b *sqlBase) watcherKeysEnabled() bool {
+	if b == nil || b.inst == nil || b.inst.Config.Watcher == nil {
+		return false
+	}
+	if v, ok := parseBool(b.inst.Config.Watcher["keys"]); ok {
+		return v
+	}
+	return false
 }
 
 func (b *sqlBase) Begin() error {
@@ -2148,7 +2169,9 @@ func (t *invalidTable) UpsertMany([]Map, ...Any) []Map { return nil }
 func (t *invalidTable) Change(Map, Map) Map            { return nil }
 func (t *invalidTable) Remove(...Any) Map              { return nil }
 func (t *invalidTable) Update(Map, ...Any) int64       { return 0 }
+func (t *invalidTable) UpdateMany(Map, ...Any) int64   { return 0 }
 func (t *invalidTable) Delete(...Any) int64            { return 0 }
+func (t *invalidTable) DeleteMany(...Any) int64        { return 0 }
 func (t *invalidTable) Entity(Any) Map                 { return nil }
 func (t *invalidTable) Count(...Any) int64             { return 0 }
 func (t *invalidTable) Aggregate(...Any) []Map         { return nil }
