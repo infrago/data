@@ -93,11 +93,9 @@ type (
 		InsertMany([]Map) []Map
 		Upsert(Map, ...Any) Map
 		UpsertMany([]Map, ...Any) []Map
-		Change(Map, Map) Map
-		Remove(...Any) Map
-		Update(Map, ...Any) int64
+		Update(Map, ...Any) Map
 		UpdateMany(Map, ...Any) int64
-		Delete(...Any) int64
+		Delete(...Any) Map
 		DeleteMany(...Any) int64
 
 		Entity(Any) Map
@@ -2166,11 +2164,9 @@ func (t *invalidTable) Insert(Map) Map                 { return nil }
 func (t *invalidTable) InsertMany([]Map) []Map         { return nil }
 func (t *invalidTable) Upsert(Map, ...Any) Map         { return nil }
 func (t *invalidTable) UpsertMany([]Map, ...Any) []Map { return nil }
-func (t *invalidTable) Change(Map, Map) Map            { return nil }
-func (t *invalidTable) Remove(...Any) Map              { return nil }
-func (t *invalidTable) Update(Map, ...Any) int64       { return 0 }
+func (t *invalidTable) Update(Map, ...Any) Map         { return nil }
 func (t *invalidTable) UpdateMany(Map, ...Any) int64   { return 0 }
-func (t *invalidTable) Delete(...Any) int64            { return 0 }
+func (t *invalidTable) Delete(...Any) Map              { return nil }
 func (t *invalidTable) DeleteMany(...Any) int64        { return 0 }
 func (t *invalidTable) Entity(Any) Map                 { return nil }
 func (t *invalidTable) Count(...Any) int64             { return 0 }

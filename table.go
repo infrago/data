@@ -234,7 +234,7 @@ func (t *sqlTable) Upsert(data Map, args ...Any) Map {
 		}
 		return out
 	}
-	out := t.Change(item, data)
+	out := t.updateEntity(item, data)
 	if t.base.Error() == nil && out != nil {
 		t.base.emitChange(MutationUpsert, t.source, 1, out[t.key], nil, condition)
 	}
@@ -266,7 +266,7 @@ func (t *sqlTable) UpsertMany(items []Map, args ...Any) []Map {
 	return out
 }
 
-func (t *sqlTable) Change(item Map, data Map) Map {
+func (t *sqlTable) updateEntity(item Map, data Map) Map {
 	if err := t.base.ensureWritable(t.name + ".change"); err != nil {
 		t.base.setError(err)
 		return nil
@@ -325,64 +325,37 @@ func (t *sqlTable) reloadEntityByKey(id Any, fallback Map) Map {
 	return entity
 }
 
-func (t *sqlTable) Remove(args ...Any) Map {
-	if err := t.base.ensureWritable(t.name + ".remove"); err != nil {
-		t.base.setError(err)
-		return nil
-	}
-	item := t.First(args...)
-	if t.base.Error() != nil || item == nil {
-		if t.base.Error() != nil {
-			t.base.setError(wrapErr(t.name+".remove.first", ErrNotFound, t.base.Error()))
-			return nil
-		}
-		t.base.setError(wrapErr(t.name+".remove.first", ErrNotFound, ErrNotFound))
-		return nil
-	}
-	d := t.base.conn.Dialect()
-	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", t.base.sourceExpr(t.schema, t.source), d.Quote(t.base.storageField(t.key)), d.Placeholder(1))
-	if _, err := t.base.currentExec().ExecContext(context.Background(), sqlText, item[t.key]); err != nil {
-		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".remove.exec", ErrInvalidQuery, classifySQLError(err)))
-		return nil
-	}
-	statsFor(t.base.inst.Name).Writes.Add(1)
-	cacheTouchTable(t.base.inst.Name, t.source)
-	t.base.emitChange(MutationDelete, t.source, 1, item[t.key], nil, Map{t.key: item[t.key]})
-	t.base.setError(nil)
-	return item
-}
-
-func (t *sqlTable) Update(sets Map, args ...Any) int64 {
+func (t *sqlTable) Update(sets Map, args ...Any) Map {
 	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
 		t.base.setError(err)
-		return 0
+		return nil
 	}
 	args = t.singleMutationArgs(args...)
 	q, err := ParseQuery(args...)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
-		return 0
+		return nil
 	}
 	q = t.mapQueryToStorage(q)
 	q = t.ensureSingleMutationQuery(q)
 	items, err := t.queryWithQuery(q)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".update.query", ErrInvalidQuery, err))
-		return 0
+		return nil
 	}
 	if len(items) == 0 {
 		t.base.setError(nil)
-		return 0
+		return nil
 	}
-	if out := t.Change(items[0], sets); out == nil {
+	if out := t.updateEntity(items[0], sets); out == nil {
 		if t.base.Error() != nil {
 			t.base.setError(wrapErr(t.name+".update.change", ErrInvalidUpdate, t.base.Error()))
 		}
-		return 0
+		return nil
+	} else {
+		t.base.setError(nil)
+		return out
 	}
-	t.base.setError(nil)
-	return 1
 }
 
 func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
@@ -459,32 +432,32 @@ func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
 	return affected
 }
 
-func (t *sqlTable) Delete(args ...Any) int64 {
+func (t *sqlTable) Delete(args ...Any) Map {
 	if err := t.base.ensureWritable(t.name + ".delete"); err != nil {
 		t.base.setError(err)
-		return 0
+		return nil
 	}
 	args = t.singleMutationArgs(args...)
 	q, err := ParseQuery(args...)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".delete.parse", ErrInvalidQuery, err))
-		return 0
+		return nil
 	}
 	q = t.mapQueryToStorage(q)
 	q = t.ensureSingleMutationQuery(q)
 	items, err := t.queryWithQuery(q)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".delete.query", ErrInvalidQuery, err))
-		return 0
+		return nil
 	}
 	if len(items) == 0 {
 		t.base.setError(nil)
-		return 0
+		return nil
 	}
 	id := items[0][t.key]
 	if id == nil {
 		t.base.setError(wrapErr(t.name+".delete.key", ErrInvalidQuery, fmt.Errorf("missing primary key %s", t.key)))
-		return 0
+		return nil
 	}
 	d := t.base.conn.Dialect()
 	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", t.base.sourceExpr(t.schema, t.source), d.Quote(t.base.storageField(t.key)), d.Placeholder(1))
@@ -492,13 +465,13 @@ func (t *sqlTable) Delete(args ...Any) int64 {
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
 		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, classifySQLError(err)))
-		return 0
+		return nil
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
 		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, classifySQLError(err)))
-		return 0
+		return nil
 	}
 	if affected > 0 {
 		statsFor(t.base.inst.Name).Writes.Add(1)
@@ -506,7 +479,10 @@ func (t *sqlTable) Delete(args ...Any) int64 {
 		t.base.emitChange(MutationDelete, t.source, affected, id, nil, Map{t.key: id})
 	}
 	t.base.setError(nil)
-	return affected
+	if affected == 0 {
+		return nil
+	}
+	return items[0]
 }
 
 func (t *sqlTable) DeleteMany(args ...Any) int64 {
@@ -1266,7 +1242,11 @@ func (t *sqlTable) updateByEntityLoop(sets Map, q Query) (int64, error) {
 	err = t.base.Tx(func(db DataBase) error {
 		tb := db.Table(t.name)
 		for _, item := range items {
-			_ = tb.Change(item, sets)
+			sqltb, ok := tb.(*sqlTable)
+			if !ok {
+				return wrapErr(t.name+".update.loop.table", ErrInvalidUpdate, fmt.Errorf("invalid table type %T", tb))
+			}
+			_ = sqltb.updateEntity(item, sets)
 			if db.Error() != nil {
 				return db.Error()
 			}
