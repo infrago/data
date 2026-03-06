@@ -78,6 +78,7 @@ func (m *Module) TableConfig(name string) *Table {
 	out.Fields = cloneVars(cfg.Fields)
 	out.Setting = cloneMap(cfg.Setting)
 	out.Indexes = cloneIndexList(cfg.Indexes)
+	out.Cascades = cloneCascadeList(cfg.Cascades)
 	return &out
 }
 
@@ -190,6 +191,20 @@ func cloneIndexList(in []Index) []Index {
 			Name:   idx.Name,
 			Fields: fields,
 			Unique: idx.Unique,
+		})
+	}
+	return out
+}
+
+func cloneCascadeList(in []Cascade) []Cascade {
+	if len(in) == 0 {
+		return []Cascade{}
+	}
+	out := make([]Cascade, 0, len(in))
+	for _, item := range in {
+		out = append(out, Cascade{
+			Table:      item.Table,
+			ForeignKey: item.ForeignKey,
 		})
 	}
 	return out

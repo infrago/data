@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrago/infra"
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 type sqlView struct {
@@ -136,6 +136,7 @@ func (v *sqlView) Count(args ...Any) int64 {
 		return 0
 	}
 	q = v.mapQueryToStorage(q)
+	v.applyTrashScope(&q)
 	if total, ok := v.loadCountCache(q); ok {
 		statsFor(v.base.inst.Name).CacheHit.Add(1)
 		v.base.setError(nil)
@@ -417,6 +418,7 @@ func (v *sqlView) Group(field string, args ...Any) []Map {
 }
 
 func (v *sqlView) queryWithQuery(q Query) ([]Map, error) {
+	v.applyTrashScope(&q)
 	if err := v.applyAfter(&q); err != nil {
 		return nil, err
 	}
@@ -500,6 +502,7 @@ func (v *sqlView) queryWithQuery(q Query) ([]Map, error) {
 }
 
 func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
+	v.applyTrashScope(&q)
 	if err := v.applyAfter(&q); err != nil {
 		return infra.Fail.With(err.Error())
 	}

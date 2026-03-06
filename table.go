@@ -325,18 +325,7 @@ func (t *sqlTable) reloadEntityByKey(id Any, fallback Map) Map {
 	return entity
 }
 
-func (t *sqlTable) Update(sets Map, args ...Any) Map {
-	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
-		t.base.setError(err)
-		return nil
-	}
-	args = t.singleMutationArgs(args...)
-	q, err := ParseQuery(args...)
-	if err != nil {
-		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
-		return nil
-	}
-	q = t.mapQueryToStorage(q)
+func (t *sqlTable) updateOneWithQuery(sets Map, q Query) Map {
 	q = t.ensureSingleMutationQuery(q)
 	items, err := t.queryWithQuery(q)
 	if err != nil {
@@ -347,29 +336,19 @@ func (t *sqlTable) Update(sets Map, args ...Any) Map {
 		t.base.setError(nil)
 		return nil
 	}
-	if out := t.updateEntity(items[0], sets); out == nil {
+	out := t.updateEntity(items[0], sets)
+	if out == nil {
 		if t.base.Error() != nil {
 			t.base.setError(wrapErr(t.name+".update.change", ErrInvalidUpdate, t.base.Error()))
 		}
 		return nil
-	} else {
-		t.base.setError(nil)
-		return out
 	}
+	t.base.setError(nil)
+	return out
 }
 
-func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
-	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
-		t.base.setError(err)
-		return 0
-	}
+func (t *sqlTable) updateManyWithQuery(sets Map, q Query, whereMap Map) int64 {
 	payload := t.withAutoUpdateStamp(sets)
-	q, err := ParseQuery(args...)
-	if err != nil {
-		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
-		return 0
-	}
-	q = t.mapQueryToStorage(q)
 	if t.blockUnsafeMutation(q) {
 		t.base.setError(wrapErr(t.name+".update.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe update blocked, set %s=true to allow full-table update", OptUnsafe)))
 		return 0
@@ -379,7 +358,6 @@ func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".update.keys", ErrInvalidQuery, keyErr))
 		return 0
 	}
-	whereMap := t.queryArgsMap(args...)
 	if t.hasCollectionUpdate(payload) {
 		affected, err := t.updateByEntityLoop(payload, q)
 		t.base.setError(err)
@@ -430,6 +408,267 @@ func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
 	t.base.emitChangeWithKeys(MutationUpdate, t.source, affected, key, keys, payload, whereMap)
 	t.base.setError(nil)
 	return affected
+}
+
+func (t *sqlTable) Update(sets Map, args ...Any) Map {
+	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
+		t.base.setError(err)
+		return nil
+	}
+	args = t.singleMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
+		return nil
+	}
+	q = t.mapQueryToStorage(q)
+	return t.updateOneWithQuery(sets, q)
+}
+
+func (t *sqlTable) UpdateMany(sets Map, args ...Any) int64 {
+	if err := t.base.ensureWritable(t.name + ".update"); err != nil {
+		t.base.setError(err)
+		return 0
+	}
+	args = t.manyMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".update.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	whereMap := t.queryArgsMap(args...)
+	return t.updateManyWithQuery(sets, q, whereMap)
+}
+
+func (t *sqlTable) Remove(args ...Any) Map {
+	if err := t.base.ensureWritable(t.name + ".remove"); err != nil {
+		t.base.setError(err)
+		return nil
+	}
+	if err := t.ensureTrashEnabled("remove"); err != nil {
+		t.base.setError(wrapErr(t.name+".remove.trash", ErrUnsupported, err))
+		return nil
+	}
+	if t.base.tx == nil {
+		var out Map
+		err := t.base.Tx(func(db DataBase) error {
+			tb := db.Table(t.name).(*sqlTable)
+			out = tb.Remove(args...)
+			return db.Error()
+		})
+		t.base.setError(err)
+		return out
+	}
+
+	args = t.singleMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".remove.parse", ErrInvalidQuery, err))
+		return nil
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, NullExpr{Field: t.base.storageField(t.base.trashField()), Yes: true})
+	out := t.updateOneWithQuery(Map{t.base.trashField(): t.base.trashValue()}, q)
+	if t.base.Error() != nil || out == nil {
+		return out
+	}
+	t.cascadeRemoveKeys([]Any{out[t.key]})
+	return out
+}
+
+func (t *sqlTable) RemoveMany(args ...Any) int64 {
+	if err := t.base.ensureWritable(t.name + ".remove"); err != nil {
+		t.base.setError(err)
+		return 0
+	}
+	if err := t.ensureTrashEnabled("remove"); err != nil {
+		t.base.setError(wrapErr(t.name+".remove.trash", ErrUnsupported, err))
+		return 0
+	}
+	if t.base.tx == nil {
+		var affected int64
+		err := t.base.Tx(func(db DataBase) error {
+			tb := db.Table(t.name).(*sqlTable)
+			affected = tb.RemoveMany(args...)
+			return db.Error()
+		})
+		t.base.setError(err)
+		return affected
+	}
+
+	args = t.manyMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".remove.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, NullExpr{Field: t.base.storageField(t.base.trashField()), Yes: true})
+	keys, err := t.mutationKeysForQuery(q, true)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".remove.keys", ErrInvalidQuery, err))
+		return 0
+	}
+	affected := t.updateManyWithQuery(Map{t.base.trashField(): t.base.trashValue()}, q, t.queryArgsMap(args...))
+	if t.base.Error() != nil || affected == 0 {
+		return affected
+	}
+	t.cascadeRemoveKeys(keys)
+	return affected
+}
+
+func (t *sqlTable) Restore(args ...Any) Map {
+	if err := t.base.ensureWritable(t.name + ".restore"); err != nil {
+		t.base.setError(err)
+		return nil
+	}
+	if err := t.ensureTrashEnabled("restore"); err != nil {
+		t.base.setError(wrapErr(t.name+".restore.trash", ErrUnsupported, err))
+		return nil
+	}
+	if t.base.tx == nil {
+		var out Map
+		err := t.base.Tx(func(db DataBase) error {
+			tb := db.Table(t.name).(*sqlTable)
+			out = tb.Restore(args...)
+			return db.Error()
+		})
+		t.base.setError(err)
+		return out
+	}
+
+	args = t.singleMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".restore.parse", ErrInvalidQuery, err))
+		return nil
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, CmpExpr{Field: t.base.storageField(t.base.trashField()), Op: OpEq, Value: t.base.trashValue()})
+	out := t.updateOneWithQuery(Map{t.base.trashField(): nil}, q)
+	if t.base.Error() != nil || out == nil {
+		return out
+	}
+	t.cascadeRestoreKeys([]Any{out[t.key]})
+	return out
+}
+
+func (t *sqlTable) RestoreMany(args ...Any) int64 {
+	if err := t.base.ensureWritable(t.name + ".restore"); err != nil {
+		t.base.setError(err)
+		return 0
+	}
+	if err := t.ensureTrashEnabled("restore"); err != nil {
+		t.base.setError(wrapErr(t.name+".restore.trash", ErrUnsupported, err))
+		return 0
+	}
+	if t.base.tx == nil {
+		var affected int64
+		err := t.base.Tx(func(db DataBase) error {
+			tb := db.Table(t.name).(*sqlTable)
+			affected = tb.RestoreMany(args...)
+			return db.Error()
+		})
+		t.base.setError(err)
+		return affected
+	}
+
+	args = t.manyMutationArgs(args...)
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".restore.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, CmpExpr{Field: t.base.storageField(t.base.trashField()), Op: OpEq, Value: t.base.trashValue()})
+	keys, err := t.mutationKeysForQuery(q, true)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".restore.keys", ErrInvalidQuery, err))
+		return 0
+	}
+	affected := t.updateManyWithQuery(Map{t.base.trashField(): nil}, q, t.queryArgsMap(args...))
+	if t.base.Error() != nil || affected == 0 {
+		return affected
+	}
+	t.cascadeRestoreKeys(keys)
+	return affected
+}
+
+func (t *sqlTable) removeManyCascade(value string, args ...Any) int64 {
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".remove.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, NullExpr{Field: t.base.storageField(t.base.trashField()), Yes: true})
+	return t.updateManyWithQuery(Map{t.base.trashField(): value}, q, t.queryArgsMap(args...))
+}
+
+func (t *sqlTable) restoreManyCascade(value string, args ...Any) int64 {
+	q, err := ParseQuery(args...)
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".restore.parse", ErrInvalidQuery, err))
+		return 0
+	}
+	q = t.mapQueryToStorage(q)
+	q.Unscoped = true
+	q.Filter = mergeExpr(q.Filter, CmpExpr{Field: t.base.storageField(t.base.trashField()), Op: OpEq, Value: value})
+	return t.updateManyWithQuery(Map{t.base.trashField(): nil}, q, t.queryArgsMap(args...))
+}
+
+func (t *sqlTable) cascadeRemoveKeys(keys []Any) {
+	if len(keys) == 0 || t.base.Error() != nil {
+		return
+	}
+	cascades, err := t.cascades()
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".remove.cascade", ErrInvalidUpdate, err))
+		return
+	}
+	for _, item := range cascades {
+		var args []Any
+		if len(keys) == 1 {
+			args = []Any{Map{item.foreignKey: keys[0]}}
+		} else {
+			args = []Any{Map{item.foreignKey: Map{OpIn: keys}}}
+		}
+		child := t.base.Table(item.table).(*sqlTable)
+		child.removeManyCascade(item.value, args...)
+		if t.base.Error() != nil {
+			return
+		}
+	}
+}
+
+func (t *sqlTable) cascadeRestoreKeys(keys []Any) {
+	if len(keys) == 0 || t.base.Error() != nil {
+		return
+	}
+	cascades, err := t.cascades()
+	if err != nil {
+		t.base.setError(wrapErr(t.name+".restore.cascade", ErrInvalidUpdate, err))
+		return
+	}
+	for _, item := range cascades {
+		var args []Any
+		if len(keys) == 1 {
+			args = []Any{Map{item.foreignKey: keys[0]}}
+		} else {
+			args = []Any{Map{item.foreignKey: Map{OpIn: keys}}}
+		}
+		child := t.base.Table(item.table).(*sqlTable)
+		child.restoreManyCascade(item.value, args...)
+		if t.base.Error() != nil {
+			return
+		}
+	}
 }
 
 func (t *sqlTable) Delete(args ...Any) Map {
@@ -490,6 +729,7 @@ func (t *sqlTable) DeleteMany(args ...Any) int64 {
 		t.base.setError(err)
 		return 0
 	}
+	args = t.manyMutationArgs(args...)
 	q, err := ParseQuery(args...)
 	if err != nil {
 		t.base.setError(wrapErr(t.name+".delete.parse", ErrInvalidQuery, err))
@@ -557,6 +797,17 @@ func (t *sqlTable) singleMutationArgs(args ...Any) []Any {
 	return []Any{Map{t.key: id}}
 }
 
+func (t *sqlTable) manyMutationArgs(args ...Any) []Any {
+	ids, ok := t.pickPrimaryValues(args...)
+	if !ok {
+		return args
+	}
+	if len(ids) == 1 {
+		return []Any{Map{t.key: ids[0]}}
+	}
+	return []Any{Map{t.key: Map{OpIn: ids}}}
+}
+
 func (t *sqlTable) pickPrimaryValue(args ...Any) (Any, bool) {
 	if len(args) == 0 {
 		return nil, false
@@ -577,6 +828,50 @@ func (t *sqlTable) pickPrimaryValue(args ...Any) (Any, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (t *sqlTable) pickPrimaryValues(args ...Any) ([]Any, bool) {
+	if len(args) == 0 {
+		return nil, false
+	}
+	storageKey := t.base.storageField(t.key)
+	keys := make([]Any, 0, len(args))
+	seen := make(map[string]struct{}, len(args))
+	var walk func(Any)
+	walk = func(arg Any) {
+		switch vv := arg.(type) {
+		case Map:
+			var id Any
+			var ok bool
+			if id, ok = vv[t.key]; !ok || id == nil {
+				if storageKey != t.key {
+					id, ok = vv[storageKey]
+				}
+			}
+			if ok && id != nil {
+				token := fmt.Sprintf("%v", id)
+				if _, exists := seen[token]; !exists {
+					seen[token] = struct{}{}
+					keys = append(keys, id)
+				}
+			}
+		case []Map:
+			for _, one := range vv {
+				walk(one)
+			}
+		case []Any:
+			for _, one := range vv {
+				walk(one)
+			}
+		}
+	}
+	for _, arg := range args {
+		walk(arg)
+	}
+	if len(keys) == 0 {
+		return nil, false
+	}
+	return keys, true
 }
 
 func (t *sqlTable) mutationKeysForQuery(q Query, enabled bool) ([]Any, error) {

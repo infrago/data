@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infrago/infra"
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 func init() {
@@ -61,6 +61,7 @@ type (
 		MaxLifetime time.Duration
 		MaxIdleTime time.Duration
 		ReadOnly    bool
+		Trash       TrashOptions
 		Watcher     Map
 		Migrate     MigrateOptions
 		Setting     Map
@@ -258,6 +259,54 @@ func (m *Module) configure(name string, cfg Map) {
 			out.ReadOnly = vv
 		}
 	}
+	if v, ok := parseBool(cfg["trash"]); ok {
+		out.Trash.Enable = v
+	}
+	switch v := cfg["trash"].(type) {
+	case Map:
+		if vv, ok := parseBool(v["enable"]); ok {
+			out.Trash.Enable = vv
+		}
+		if vv, ok := v["field"].(string); ok {
+			out.Trash.Field = strings.TrimSpace(vv)
+		}
+		if vv, ok := v["value"].(string); ok {
+			out.Trash.Value = strings.TrimSpace(vv)
+		}
+		if vv, ok := v["cascade"].(string); ok {
+			out.Trash.Cascade = strings.TrimSpace(vv)
+		}
+	}
+	if v, ok := parseBool(cfg["trashEnable"]); ok {
+		out.Trash.Enable = v
+	}
+	if v, ok := parseBool(cfg["trash_enable"]); ok {
+		out.Trash.Enable = v
+	}
+	if v, ok := cfg["trashField"].(string); ok {
+		out.Trash.Field = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trash_field"].(string); ok {
+		out.Trash.Field = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trashValue"].(string); ok {
+		out.Trash.Value = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trash_value"].(string); ok {
+		out.Trash.Value = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trashCascade"].(string); ok {
+		out.Trash.Cascade = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trash_cascade"].(string); ok {
+		out.Trash.Cascade = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trashCascadeValue"].(string); ok {
+		out.Trash.Cascade = strings.TrimSpace(v)
+	}
+	if v, ok := cfg["trash_cascade_value"].(string); ok {
+		out.Trash.Cascade = strings.TrimSpace(v)
+	}
 	if v, ok := cfg["watcher"].(Map); ok {
 		out.Watcher = v
 	}
@@ -349,13 +398,14 @@ func (m *Module) configure(name string, cfg Map) {
 	if v, ok := cfg["setting"].(Map); ok {
 		out.Setting = v
 	}
+	out.Trash = normalizeTrashOptions(out.Trash)
 
 	m.configs[name] = out
 }
 
 func isDataReservedMapKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "setting", "migrate", "watcher":
+	case "setting", "migrate", "watcher", "trash":
 		return true
 	default:
 		return false
@@ -434,6 +484,7 @@ func (m *Module) Setup() {
 				cfg.Schema = schema
 			}
 		}
+		cfg.Trash = normalizeTrashOptions(cfg.Trash)
 		m.configs[name] = cfg
 	}
 	m.initialized = true

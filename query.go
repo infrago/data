@@ -12,19 +12,22 @@ type (
 	FieldRef string
 
 	Query struct {
-		Select    []string
-		Filter    Expr
-		Sort      []Sort
-		Limit     int64
-		Offset    int64
-		After     Map
-		WithCount bool
-		Unsafe    bool
-		Batch     int64
-		Group     []string
-		Aggs      []Agg
-		Having    Expr
-		Joins     []Join
+		Select      []string
+		Filter      Expr
+		Sort        []Sort
+		Limit       int64
+		Offset      int64
+		After       Map
+		WithCount   bool
+		WithDeleted bool
+		OnlyDeleted bool
+		Unscoped    bool
+		Unsafe      bool
+		Batch       int64
+		Group       []string
+		Aggs        []Agg
+		Having      Expr
+		Joins       []Join
 
 		RawWhere  string
 		RawParams []Any
@@ -150,18 +153,21 @@ func ParseQuery(args ...Any) (Query, error) {
 func Ref(field string) FieldRef { return FieldRef(strings.TrimSpace(field)) }
 
 type queryOptions struct {
-	selects   []string
-	sorts     []Sort
-	limit     *int64
-	offset    *int64
-	after     Map
-	withCount *bool
-	unsafe    *bool
-	batch     *int64
-	group     []string
-	aggs      []Agg
-	having    Expr
-	joins     []Join
+	selects     []string
+	sorts       []Sort
+	limit       *int64
+	offset      *int64
+	after       Map
+	withCount   *bool
+	withDeleted *bool
+	onlyDeleted *bool
+	unscoped    *bool
+	unsafe      *bool
+	batch       *int64
+	group       []string
+	aggs        []Agg
+	having      Expr
+	joins       []Join
 }
 
 func mergeOptions(q *Query, opts queryOptions) {
@@ -182,6 +188,15 @@ func mergeOptions(q *Query, opts queryOptions) {
 	}
 	if opts.withCount != nil {
 		q.WithCount = *opts.withCount
+	}
+	if opts.withDeleted != nil {
+		q.WithDeleted = *opts.withDeleted
+	}
+	if opts.onlyDeleted != nil {
+		q.OnlyDeleted = *opts.onlyDeleted
+	}
+	if opts.unscoped != nil {
+		q.Unscoped = *opts.unscoped
 	}
 	if opts.unsafe != nil {
 		q.Unsafe = *opts.unsafe
@@ -227,6 +242,18 @@ func parseFilterMap(m Map) (Expr, queryOptions, error) {
 			case OptWithCount:
 				if vv, ok := parseBool(val); ok {
 					opts.withCount = &vv
+				}
+			case OptWithDeleted, "$with_deleted":
+				if vv, ok := parseBool(val); ok {
+					opts.withDeleted = &vv
+				}
+			case OptOnlyDeleted, "$only_deleted":
+				if vv, ok := parseBool(val); ok {
+					opts.onlyDeleted = &vv
+				}
+			case OptUnscoped:
+				if vv, ok := parseBool(val); ok {
+					opts.unscoped = &vv
 				}
 			case OptUnsafe:
 				if vv, ok := parseBool(val); ok {

@@ -9,15 +9,21 @@ type (
 		Unique bool
 	}
 
+	Cascade struct {
+		Table      string
+		ForeignKey string
+	}
+
 	Table struct {
-		Name    string
-		Desc    string
-		Schema  string
-		Table   string
-		Key     string
-		Fields  Vars
-		Indexes []Index
-		Setting Map
+		Name     string
+		Desc     string
+		Schema   string
+		Table    string
+		Key      string
+		Fields   Vars
+		Indexes  []Index
+		Cascades []Cascade
+		Setting  Map
 	}
 
 	View struct {
