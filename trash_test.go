@@ -319,3 +319,62 @@ func TestManyMutationArgsUsesPrimaryKeysFromEntityList(t *testing.T) {
 		t.Fatalf("unexpected primary keys: %#v", ids)
 	}
 }
+
+func TestSingleMutationArgsKeepsQueryOptions(t *testing.T) {
+	table := &sqlTable{
+		sqlView: sqlView{
+			base: &sqlBase{},
+			key:  "id",
+		},
+	}
+
+	args := table.singleMutationArgs(
+		Map{"id": 7},
+		Map{OptUnscoped: true},
+	)
+	if len(args) != 1 {
+		t.Fatalf("expected one arg, got %#v", args)
+	}
+	where, ok := args[0].(Map)
+	if !ok {
+		t.Fatalf("expected map arg, got %T", args[0])
+	}
+	if where["id"] != 7 {
+		t.Fatalf("expected id condition, got %#v", where)
+	}
+	if where[OptUnscoped] != true {
+		t.Fatalf("expected %s option preserved, got %#v", OptUnscoped, where)
+	}
+}
+
+func TestManyMutationArgsKeepsQueryOptions(t *testing.T) {
+	table := &sqlTable{
+		sqlView: sqlView{
+			base: &sqlBase{},
+			key:  "id",
+		},
+	}
+
+	args := table.manyMutationArgs(
+		[]Map{{"id": 1}, {"id": 2}},
+		Map{OptUnscoped: true},
+	)
+	if len(args) != 1 {
+		t.Fatalf("expected one arg, got %#v", args)
+	}
+	where, ok := args[0].(Map)
+	if !ok {
+		t.Fatalf("expected map arg, got %T", args[0])
+	}
+	in, ok := where["id"].(Map)
+	if !ok {
+		t.Fatalf("expected id in condition, got %#v", where["id"])
+	}
+	ids, ok := in[OpIn].([]Any)
+	if !ok || len(ids) != 2 {
+		t.Fatalf("expected two ids, got %#v", in[OpIn])
+	}
+	if where[OptUnscoped] != true {
+		t.Fatalf("expected %s option preserved, got %#v", OptUnscoped, where)
+	}
+}

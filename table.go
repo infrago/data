@@ -794,7 +794,9 @@ func (t *sqlTable) singleMutationArgs(args ...Any) []Any {
 	if !ok {
 		return args
 	}
-	return []Any{Map{t.key: id}}
+	where := t.pickMutationOptions(args...)
+	where[t.key] = id
+	return []Any{where}
 }
 
 func (t *sqlTable) manyMutationArgs(args ...Any) []Any {
@@ -802,10 +804,13 @@ func (t *sqlTable) manyMutationArgs(args ...Any) []Any {
 	if !ok {
 		return args
 	}
+	where := t.pickMutationOptions(args...)
 	if len(ids) == 1 {
-		return []Any{Map{t.key: ids[0]}}
+		where[t.key] = ids[0]
+		return []Any{where}
 	}
-	return []Any{Map{t.key: Map{OpIn: ids}}}
+	where[t.key] = Map{OpIn: ids}
+	return []Any{where}
 }
 
 func (t *sqlTable) pickPrimaryValue(args ...Any) (Any, bool) {
@@ -872,6 +877,24 @@ func (t *sqlTable) pickPrimaryValues(args ...Any) ([]Any, bool) {
 		return nil, false
 	}
 	return keys, true
+}
+
+func (t *sqlTable) pickMutationOptions(args ...Any) Map {
+	opts := Map{}
+	for _, arg := range args {
+		m, ok := arg.(Map)
+		if !ok || len(m) == 0 {
+			continue
+		}
+		for k, v := range m {
+			key := strings.TrimSpace(k)
+			if key == "" || !strings.HasPrefix(key, "$") {
+				continue
+			}
+			opts[key] = v
+		}
+	}
+	return opts
 }
 
 func (t *sqlTable) mutationKeysForQuery(q Query, enabled bool) ([]Any, error) {
