@@ -5,12 +5,6 @@ import (
 	"strings"
 )
 
-const (
-	OptWithDeleted = "$withDeleted"
-	OptOnlyDeleted = "$onlyDeleted"
-	OptUnscoped    = "$unscoped"
-)
-
 type (
 	TrashOptions struct {
 		Enable  bool

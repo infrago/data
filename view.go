@@ -1,7 +1,9 @@
 package data
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -807,6 +809,7 @@ func (v *sqlView) buildFrom(q Query, builder *SQLBuilder) (string, string, error
 
 func (v *sqlView) decode(item Map) (Map, error) {
 	item = v.base.appMap(item)
+	item = v.decodeStructuredValues(item)
 	if len(v.fields) == 0 {
 		return item, nil
 	}
@@ -816,6 +819,193 @@ func (v *sqlView) decode(item Map) (Map, error) {
 		return nil, fmt.Errorf("decode %s failed: %s", v.name, res.Error())
 	}
 	return out, nil
+}
+
+func (v *sqlView) decodeStructuredValues(item Map) Map {
+	if len(item) == 0 || len(v.fields) == 0 {
+		return item
+	}
+	out := Map{}
+	for key, value := range item {
+		cfg, ok := lookupField(v.fields, key)
+		if !ok {
+			out[key] = value
+			continue
+		}
+		out[key] = decodeStructuredFieldValue(cfg.Type, value)
+	}
+	return out
+}
+
+func decodeStructuredFieldValue(typeName string, value Any) Any {
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+	kind := strings.ToLower(strings.TrimSpace(typeName))
+	if kind == "" {
+		return value
+	}
+	if !(strings.HasPrefix(kind, "[") || strings.HasPrefix(kind, "array") || kind == "json" || kind == "jsonb" || strings.HasPrefix(kind, "map")) {
+		return value
+	}
+	raw := strings.TrimSpace(text)
+	if raw == "" {
+		return value
+	}
+	if !((strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]")) || (strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}"))) {
+		return value
+	}
+	var parsed Any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return value
+	}
+	if isArrayTypeName(kind) {
+		if strings.Contains(kind, "uint") {
+			if out, ok := toInt64Slice(parsed, true); ok {
+				return out
+			}
+		}
+		if strings.Contains(kind, "int") {
+			if out, ok := toInt64Slice(parsed, false); ok {
+				return out
+			}
+		}
+		if strings.Contains(kind, "float") || strings.Contains(kind, "double") || strings.Contains(kind, "decimal") || strings.Contains(kind, "number") {
+			if out, ok := toFloat64Slice(parsed); ok {
+				return out
+			}
+		}
+	}
+	return parsed
+}
+
+func isArrayTypeName(kind string) bool {
+	return strings.HasPrefix(kind, "[") || strings.HasPrefix(kind, "array")
+}
+
+func toInt64Slice(value Any, nonNegative bool) ([]int64, bool) {
+	items, ok := value.([]Any)
+	if !ok {
+		if raw, ok := value.([]any); ok {
+			items = raw
+		} else {
+			return nil, false
+		}
+	}
+	out := make([]int64, 0, len(items))
+	for _, one := range items {
+		n, ok := toInt64Value(one)
+		if !ok {
+			return nil, false
+		}
+		if nonNegative && n < 0 {
+			n = 0
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+func toFloat64Slice(value Any) ([]float64, bool) {
+	items, ok := value.([]Any)
+	if !ok {
+		if raw, ok := value.([]any); ok {
+			items = raw
+		} else {
+			return nil, false
+		}
+	}
+	out := make([]float64, 0, len(items))
+	for _, one := range items {
+		n, ok := toFloat64Value(one)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+func toInt64Value(value Any) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint:
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint64:
+		if v > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(v), true
+	case float32:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, false
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f), true
+		}
+	}
+	return 0, false
+}
+
+func toFloat64Value(value Any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, false
+		}
+		n, err := strconv.ParseFloat(s, 64)
+		return n, err == nil
+	}
+	return 0, false
 }
 
 func (v *sqlView) loadQueryCache(q Query) ([]Map, bool) {
