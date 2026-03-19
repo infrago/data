@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/infrago/infra"
 	. "github.com/infrago/base"
+	"github.com/infrago/infra"
 )
 
 type moduleStats struct {
@@ -427,9 +427,9 @@ func cacheInvalidateTable(name, table string) {
 
 func registerCacheSyncService(h infra.Host) {
 	cacheSyncOnce.Do(func() {
-		service := infra.Service{
+		message := infra.Message{
 			Name: "数据缓存失效同步",
-			Desc: "内部服务：同步数据查询缓存按表失效事件",
+			Desc: "内部消息：同步数据查询缓存按表失效事件",
 			Action: func(ctx *infra.Context) {
 				baseName, _ := ctx.Value["base"].(string)
 				table, _ := ctx.Value["table"].(string)
@@ -444,10 +444,10 @@ func registerCacheSyncService(h infra.Host) {
 			},
 		}
 		if h != nil {
-			h.RegisterLocal(cacheInvalidateTopic, service)
+			h.RegisterLocal(cacheInvalidateTopic, message)
 			return
 		}
-		infra.Register(cacheInvalidateTopic, service)
+		infra.Register(cacheInvalidateTopic, message)
 	})
 }
 
