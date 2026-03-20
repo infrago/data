@@ -137,6 +137,7 @@ type sqlBase struct {
 	inst   *Instance
 	conn   Connection
 	tx     *sql.Tx
+	txDone context.CancelFunc
 	closed bool
 	mutex  sync.RWMutex
 	err    error
@@ -179,6 +180,10 @@ func (b *sqlBase) Close() error {
 	if b.tx != nil {
 		_ = b.tx.Rollback()
 		b.tx = nil
+	}
+	if b.txDone != nil {
+		b.txDone()
+		b.txDone = nil
 	}
 	b.closed = true
 	return nil
@@ -289,17 +294,18 @@ func (b *sqlBase) beginTx(readOnly bool) error {
 		return nil
 	}
 	ctx, cancel := b.opContext(10 * time.Second)
-	defer cancel()
 	opts := &sql.TxOptions{}
 	if readOnly {
 		opts.ReadOnly = true
 	}
 	tx, err := b.conn.DB().BeginTx(ctx, opts)
 	if err != nil {
+		cancel()
 		statsFor(b.inst.Name).Errors.Add(1)
 		return wrapErr("tx.begin", ErrTxFailed, classifySQLError(err))
 	}
 	b.tx = tx
+	b.txDone = cancel
 	return nil
 }
 
@@ -309,6 +315,10 @@ func (b *sqlBase) Commit() error {
 	}
 	err := b.tx.Commit()
 	b.tx = nil
+	if b.txDone != nil {
+		b.txDone()
+		b.txDone = nil
+	}
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
 		return wrapErr("tx.commit", ErrTxFailed, classifySQLError(err))
@@ -322,6 +332,10 @@ func (b *sqlBase) Rollback() error {
 	}
 	err := b.tx.Rollback()
 	b.tx = nil
+	if b.txDone != nil {
+		b.txDone()
+		b.txDone = nil
+	}
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
 		return wrapErr("tx.rollback", ErrTxFailed, classifySQLError(err))
