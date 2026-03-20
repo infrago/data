@@ -218,6 +218,111 @@ func mergeOptions(q *Query, opts queryOptions) {
 	}
 }
 
+func mergeQueryOptions(dst *queryOptions, src queryOptions) {
+	if dst == nil {
+		return
+	}
+	if len(src.selects) > 0 {
+		dst.selects = src.selects
+	}
+	if len(src.sorts) > 0 {
+		dst.sorts = src.sorts
+	}
+	if src.limit != nil {
+		dst.limit = src.limit
+	}
+	if src.offset != nil {
+		dst.offset = src.offset
+	}
+	if len(src.after) > 0 {
+		dst.after = src.after
+	}
+	if src.withCount != nil {
+		dst.withCount = src.withCount
+	}
+	if src.withDeleted != nil {
+		dst.withDeleted = src.withDeleted
+	}
+	if src.onlyDeleted != nil {
+		dst.onlyDeleted = src.onlyDeleted
+	}
+	if src.unscoped != nil {
+		dst.unscoped = src.unscoped
+	}
+	if src.unsafe != nil {
+		dst.unsafe = src.unsafe
+	}
+	if src.batch != nil {
+		dst.batch = src.batch
+	}
+	if len(src.group) > 0 {
+		dst.group = src.group
+	}
+	if len(src.aggs) > 0 {
+		dst.aggs = src.aggs
+	}
+	if src.having != nil {
+		dst.having = src.having
+	}
+	if len(src.joins) > 0 {
+		dst.joins = src.joins
+	}
+}
+
+func combineAndExprs(items []Expr) Expr {
+	switch len(items) {
+	case 0:
+		return nil
+	case 1:
+		return items[0]
+	default:
+		return AndExpr{Items: items}
+	}
+}
+
+func parseNestedFilterValue(val Any) (Expr, queryOptions, error) {
+	opts := queryOptions{}
+	items := make([]Expr, 0)
+	switch vv := val.(type) {
+	case Map:
+		e, nested, err := parseFilterMap(vv)
+		if err != nil {
+			return nil, opts, err
+		}
+		mergeQueryOptions(&opts, nested)
+		if e != nil {
+			items = append(items, e)
+		}
+	case []Map:
+		for _, item := range vv {
+			e, nested, err := parseFilterMap(item)
+			if err != nil {
+				return nil, opts, err
+			}
+			mergeQueryOptions(&opts, nested)
+			if e != nil {
+				items = append(items, e)
+			}
+		}
+	case []Any:
+		for _, item := range vv {
+			m, ok := item.(Map)
+			if !ok {
+				continue
+			}
+			e, nested, err := parseFilterMap(m)
+			if err != nil {
+				return nil, opts, err
+			}
+			mergeQueryOptions(&opts, nested)
+			if e != nil {
+				items = append(items, e)
+			}
+		}
+	}
+	return combineAndExprs(items), opts, nil
+}
+
 func parseFilterMap(m Map) (Expr, queryOptions, error) {
 	opts := queryOptions{}
 	ands := make([]Expr, 0)
@@ -274,6 +379,15 @@ func parseFilterMap(m Map) (Expr, queryOptions, error) {
 						return nil, opts, err
 					}
 					opts.having = he
+				}
+			case OptFilter, OptFilters:
+				e, nested, err := parseNestedFilterValue(val)
+				if err != nil {
+					return nil, opts, err
+				}
+				mergeQueryOptions(&opts, nested)
+				if e != nil {
+					ands = append(ands, e)
 				}
 			case OptJoin:
 				opts.joins = parseJoins(val)
