@@ -7,15 +7,16 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("data: not found")
-	ErrConflict      = errors.New("data: conflict")
-	ErrUnsupported   = errors.New("data: unsupported")
-	ErrInvalidQuery  = errors.New("data: invalid query")
-	ErrInvalidUpdate = errors.New("data: invalid update")
-	ErrTxFailed      = errors.New("data: tx failed")
-	ErrValidation    = errors.New("data: validation")
-	ErrDriver        = errors.New("data: driver")
-	ErrTimeout       = errors.New("data: timeout")
+	ErrNotFound        = errors.New("data: not found")
+	ErrConflict        = errors.New("data: conflict")
+	ErrUnsupported     = errors.New("data: unsupported")
+	ErrInvalidQuery    = errors.New("data: invalid query")
+	ErrInvalidUpdate   = errors.New("data: invalid update")
+	ErrInvalidSequence = errors.New("data: invalid sequence")
+	ErrTxFailed        = errors.New("data: tx failed")
+	ErrValidation      = errors.New("data: validation")
+	ErrDriver          = errors.New("data: driver")
+	ErrTimeout         = errors.New("data: timeout")
 )
 
 type DataError struct {
@@ -79,7 +80,7 @@ func classifySQLError(err error) error {
 }
 
 func classifyErrorKind(code error, err error) string {
-	if code == ErrInvalidQuery || code == ErrInvalidUpdate || code == ErrValidation {
+	if code == ErrInvalidQuery || code == ErrInvalidUpdate || code == ErrInvalidSequence || code == ErrValidation {
 		return "validation"
 	}
 	if code == ErrTxFailed {

@@ -6,6 +6,18 @@ func Base(names ...string) DataBase {
 	return module.Base(names...)
 }
 
+func Sequence(key string, offset, step int64, names ...string) (int64, error) {
+	db := Base(names...)
+	defer db.Close()
+	return db.Sequence(key, offset, step)
+}
+
+func SequenceMany(key string, count, offset, step int64, names ...string) ([]int64, error) {
+	db := Base(names...)
+	defer db.Close()
+	return db.SequenceMany(key, count, offset, step)
+}
+
 func Migrate(names ...string) error {
 	db := Base()
 	defer db.Close()

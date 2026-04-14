@@ -78,6 +78,8 @@ type (
 		Capabilities() Capabilities
 		Error() error
 		ClearError()
+		Sequence(string, int64, int64) (int64, error)
+		SequenceMany(string, int64, int64, int64) ([]int64, error)
 
 		Table(string) DataTable
 		View(string) DataView
@@ -155,6 +157,10 @@ type invalidTable struct {
 	err error
 }
 
+const internalSequenceTable = "_infrago_sequences"
+
+var sequenceStoreReady sync.Map
+
 func (m *Module) Base(names ...string) DataBase {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
@@ -220,6 +226,79 @@ func (b *sqlBase) ClearError() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.err = nil
+}
+
+func (b *sqlBase) Sequence(key string, offset, step int64) (int64, error) {
+	items, err := b.SequenceMany(key, 1, offset, step)
+	if err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+	return items[0], nil
+}
+
+func (b *sqlBase) SequenceMany(key string, count, offset, step int64) ([]int64, error) {
+	if err := b.ensureWritable("sequence"); err != nil {
+		b.setError(err)
+		return nil, err
+	}
+
+	key = strings.TrimSpace(key)
+	if key == "" {
+		err := wrapErr("sequence", ErrInvalidSequence, errors.New("sequence key is empty"))
+		b.setError(err)
+		return nil, err
+	}
+	if count <= 0 {
+		err := wrapErr("sequence", ErrInvalidSequence, fmt.Errorf("invalid sequence count: %d", count))
+		b.setError(err)
+		return nil, err
+	}
+	if step == 0 {
+		step = 1
+	}
+
+	if err := b.ensureSequenceStore(); err != nil {
+		err = wrapErr("sequence.ensure", ErrDriver, classifySQLError(err))
+		b.setError(err)
+		return nil, err
+	}
+
+	if b.tx != nil {
+		items, err := b.sequenceRange(key, count, offset, step)
+		if err != nil {
+			err = wrapErr("sequence.next", ErrDriver, classifySQLError(err))
+			b.setError(err)
+			return nil, err
+		}
+		b.setError(nil)
+		return items, nil
+	}
+
+	if err := b.beginTx(false); err != nil {
+		err = wrapErr("sequence.begin", ErrTxFailed, classifySQLError(err))
+		b.setError(err)
+		return nil, err
+	}
+
+	items, err := b.sequenceRange(key, count, offset, step)
+	if err != nil {
+		_ = b.Rollback()
+		err = wrapErr("sequence.next", ErrDriver, classifySQLError(err))
+		b.setError(err)
+		return nil, err
+	}
+	if err := b.Commit(); err != nil {
+		_ = b.Rollback()
+		err = wrapErr("sequence.commit", ErrTxFailed, classifySQLError(err))
+		b.setError(err)
+		return nil, err
+	}
+
+	b.setError(nil)
+	return items, nil
 }
 
 func (b *sqlBase) setError(err error) {
@@ -1279,6 +1358,161 @@ func (b *sqlBase) currentExec() execer {
 	return b.conn.DB()
 }
 
+func (b *sqlBase) ensureSequenceStore() error {
+	if b == nil || b.inst == nil || b.conn == nil || b.conn.DB() == nil {
+		return errInvalidConnection
+	}
+
+	cacheKey := sequenceStoreCacheKey(b.inst.Name, b.conn.Dialect().Name())
+	if _, ok := sequenceStoreReady.Load(cacheKey); ok {
+		return nil
+	}
+
+	d := b.conn.Dialect()
+	table := d.Quote(internalSequenceTable)
+	keyCol := d.Quote("key")
+	valCol := d.Quote("value")
+	updCol := d.Quote("updated_at")
+
+	query := "CREATE TABLE IF NOT EXISTS " + table + " (" +
+		keyCol + " TEXT PRIMARY KEY, " +
+		valCol + " BIGINT NOT NULL, " +
+		updCol + " BIGINT NOT NULL)"
+	if strings.Contains(strings.ToLower(d.Name()), "mysql") {
+		query = "CREATE TABLE IF NOT EXISTS " + table + " (" +
+			keyCol + " VARCHAR(191) PRIMARY KEY, " +
+			valCol + " BIGINT NOT NULL, " +
+			updCol + " BIGINT NOT NULL)"
+	}
+
+	ctx, cancel := b.opContext(10 * time.Second)
+	defer cancel()
+	if _, err := b.conn.DB().ExecContext(ctx, query); err != nil {
+		return err
+	}
+	sequenceStoreReady.Store(cacheKey, struct{}{})
+	return nil
+}
+
+func (b *sqlBase) sequenceRange(key string, count, offset, step int64) ([]int64, error) {
+	dialect := strings.ToLower(strings.TrimSpace(b.conn.Dialect().Name()))
+	switch dialect {
+	case "mysql":
+		return b.sequenceRangeMySQL(key, count, offset, step)
+	default:
+		return b.sequenceRangeUpsert(key, count, offset, step)
+	}
+}
+
+func (b *sqlBase) sequenceRangeUpsert(key string, count, offset, step int64) ([]int64, error) {
+	d := b.conn.Dialect()
+	table := d.Quote(internalSequenceTable)
+	keyCol := d.Quote("key")
+	valCol := d.Quote("value")
+	updCol := d.Quote("updated_at")
+	now := time.Now().Unix()
+	initialLast := offset + (count-1)*step
+	delta := count * step
+
+	var query string
+	switch strings.ToLower(strings.TrimSpace(d.Name())) {
+	case "pgsql", "postgres":
+		query = "UPDATE " + table + " SET " + valCol + " = " + valCol + " + $1, " + updCol + " = $2 WHERE " + keyCol + " = $3 RETURNING " + valCol
+	case "sqlite":
+		query = "UPDATE " + table + " SET " + valCol + " = " + valCol + " + ?, " + updCol + " = ? WHERE " + keyCol + " = ? RETURNING " + valCol
+	default:
+		return nil, wrapErr("sequence.dialect", ErrUnsupported, fmt.Errorf("unsupported sequence dialect: %s", d.Name()))
+	}
+
+	ctx, cancel := b.opContext(10 * time.Second)
+	defer cancel()
+
+	if _, err := b.currentExec().ExecContext(ctx,
+		"INSERT INTO "+table+"("+keyCol+","+valCol+","+updCol+") VALUES("+sequenceInsertPlaceholders(d)+")",
+		key, initialLast, now,
+	); err == nil {
+		return sequenceItemsFromStart(offset, count, step), nil
+	} else if !isSequenceConflictErr(err) {
+		return nil, err
+	}
+
+	var last int64
+	if err := b.currentExec().QueryRowContext(ctx, query, delta, now, key).Scan(&last); err != nil {
+		return nil, err
+	}
+	return sequenceItemsFromLast(last, count, step), nil
+}
+
+func (b *sqlBase) sequenceRangeMySQL(key string, count, offset, step int64) ([]int64, error) {
+	d := b.conn.Dialect()
+	table := d.Quote(internalSequenceTable)
+	keyCol := d.Quote("key")
+	valCol := d.Quote("value")
+	updCol := d.Quote("updated_at")
+	now := time.Now().Unix()
+	initialLast := offset + (count-1)*step
+	delta := count * step
+
+	ctx, cancel := b.opContext(10 * time.Second)
+	defer cancel()
+
+	insert := "INSERT INTO " + table + "(" + keyCol + "," + valCol + "," + updCol + ") VALUES(?,?,?)"
+	if _, err := b.currentExec().ExecContext(ctx, insert, key, initialLast, now); err == nil {
+		return sequenceItemsFromStart(offset, count, step), nil
+	} else if !isSequenceConflictErr(err) {
+		return nil, err
+	}
+
+	selectSQL := "SELECT " + valCol + " FROM " + table + " WHERE " + keyCol + " = ? FOR UPDATE"
+	var current int64
+	if err := b.currentExec().QueryRowContext(ctx, selectSQL, key).Scan(&current); err != nil {
+		return nil, err
+	}
+
+	next := current + delta
+	update := "UPDATE " + table + " SET " + valCol + " = ?, " + updCol + " = ? WHERE " + keyCol + " = ?"
+	if _, err := b.currentExec().ExecContext(ctx, update, next, now, key); err != nil {
+		return nil, err
+	}
+	return sequenceItemsFromLast(next, count, step), nil
+}
+
+func sequenceStoreCacheKey(name, dialect string) string {
+	return strings.TrimSpace(strings.ToLower(name)) + ":" + strings.TrimSpace(strings.ToLower(dialect))
+}
+
+func isSequenceConflictErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") || strings.Contains(msg, "unique") || strings.Contains(msg, "constraint")
+}
+
+func sequenceInsertPlaceholders(d Dialect) string {
+	switch strings.ToLower(strings.TrimSpace(d.Name())) {
+	case "pgsql", "postgres":
+		return "$1,$2,$3"
+	default:
+		return "?,?,?"
+	}
+}
+
+func sequenceItemsFromStart(start, count, step int64) []int64 {
+	items := make([]int64, 0, int(count))
+	value := start
+	for i := int64(0); i < count; i++ {
+		items = append(items, value)
+		value += step
+	}
+	return items
+}
+
+func sequenceItemsFromLast(last, count, step int64) []int64 {
+	start := last - (count-1)*step
+	return sequenceItemsFromStart(start, count, step)
+}
+
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -2169,11 +2403,17 @@ func (b *invalidDataBase) MigrateDownTo(string)       {}
 func (b *invalidDataBase) Capabilities() Capabilities { return Capabilities{} }
 func (b *invalidDataBase) Error() error               { return b.err }
 func (b *invalidDataBase) ClearError()                {}
-func (b *invalidDataBase) Table(string) DataTable     { return &invalidTable{err: b.err} }
-func (b *invalidDataBase) View(string) DataView       { return &invalidTable{err: b.err} }
-func (b *invalidDataBase) Model(string) DataModel     { return &invalidTable{err: b.err} }
-func (b *invalidDataBase) Raw(string, ...Any) []Map   { return nil }
-func (b *invalidDataBase) Exec(string, ...Any) int64  { return 0 }
+func (b *invalidDataBase) Sequence(string, int64, int64) (int64, error) {
+	return 0, b.err
+}
+func (b *invalidDataBase) SequenceMany(string, int64, int64, int64) ([]int64, error) {
+	return nil, b.err
+}
+func (b *invalidDataBase) Table(string) DataTable    { return &invalidTable{err: b.err} }
+func (b *invalidDataBase) View(string) DataView      { return &invalidTable{err: b.err} }
+func (b *invalidDataBase) Model(string) DataModel    { return &invalidTable{err: b.err} }
+func (b *invalidDataBase) Raw(string, ...Any) []Map  { return nil }
+func (b *invalidDataBase) Exec(string, ...Any) int64 { return 0 }
 func (b *invalidDataBase) Parse(...Any) (string, []Any) {
 	return "", nil
 }

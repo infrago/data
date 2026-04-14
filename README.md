@@ -12,6 +12,32 @@
 - 对上提供统一模块接口
 - 对下通过驱动接口接入具体后端
 - 支持按配置切换驱动实现
+- 支持数据库内自增序列 `Sequence`
+
+## 序列编号
+
+`DataBase` 现在支持：
+
+```go
+db := data.Base("main")
+defer db.Close()
+
+id, err := db.Sequence("order.no", 1000, 1)
+ids, err := db.SequenceMany("order.no", 3, 1000, 1)
+```
+
+语义：
+
+- 第一次调用某个 `key`：返回 `offset`
+- 之后每次：返回 `current + step`
+- `offset` 只在序列首次创建时生效
+- `step == 0` 时按 `1` 处理
+- `SequenceMany` 一次原子领取一段编号，例如 `[1000, 1001, 1002]`
+
+实现方式：
+
+- SQL 驱动使用内部表 `_infrago_sequences`
+- MongoDB 驱动使用内部集合 `_infrago_sequences`
 
 ## 快速接入
 
