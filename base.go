@@ -1413,20 +1413,31 @@ func (b *sqlBase) sequenceRangeUpsert(key string, count, offset, step int64) ([]
 	now := time.Now().Unix()
 	initialLast := offset + (count-1)*step
 	delta := count * step
+	dialect := strings.ToLower(strings.TrimSpace(d.Name()))
 
-	var query string
-	switch strings.ToLower(strings.TrimSpace(d.Name())) {
-	case "pgsql", "postgres":
-		query = "UPDATE " + table + " SET " + valCol + " = " + valCol + " + $1, " + updCol + " = $2 WHERE " + keyCol + " = $3 RETURNING " + valCol
-	case "sqlite":
-		query = "UPDATE " + table + " SET " + valCol + " = " + valCol + " + ?, " + updCol + " = ? WHERE " + keyCol + " = ? RETURNING " + valCol
-	default:
+	if dialect != "pgsql" && dialect != "postgres" && dialect != "sqlite" {
 		return nil, wrapErr("sequence.dialect", ErrUnsupported, fmt.Errorf("unsupported sequence dialect: %s", d.Name()))
 	}
 
 	ctx, cancel := b.opContext(10 * time.Second)
 	defer cancel()
 
+	if dialect == "pgsql" || dialect == "postgres" {
+		query := "INSERT INTO " + table + "(" + keyCol + "," + valCol + "," + updCol + ") VALUES($1,$2,$3) " +
+			"ON CONFLICT(" + keyCol + ") DO UPDATE SET " + valCol + " = " + table + "." + valCol + " + $4, " + updCol + " = EXCLUDED." + updCol +
+			" RETURNING " + valCol + ", (xmax = 0)"
+		var last int64
+		var inserted bool
+		if err := b.currentExec().QueryRowContext(ctx, query, key, initialLast, now, delta).Scan(&last, &inserted); err != nil {
+			return nil, err
+		}
+		if inserted {
+			return sequenceItemsFromStart(offset, count, step), nil
+		}
+		return sequenceItemsFromLast(last, count, step), nil
+	}
+
+	query := "UPDATE " + table + " SET " + valCol + " = " + valCol + " + ?, " + updCol + " = ? WHERE " + keyCol + " = ? RETURNING " + valCol
 	if _, err := b.currentExec().ExecContext(ctx,
 		"INSERT INTO "+table+"("+keyCol+","+valCol+","+updCol+") VALUES("+sequenceInsertPlaceholders(d)+")",
 		key, initialLast, now,
