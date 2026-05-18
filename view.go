@@ -1,11 +1,13 @@
 package data
 
 import (
-	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/infrago/base"
@@ -21,7 +23,17 @@ type sqlView struct {
 	fields Vars
 }
 
-var sqlPlanCache sync.Map
+type sqlPlan struct {
+	SQL    string
+	Params []Any
+	Hits   atomic.Int64
+	UsedAt atomic.Int64
+}
+
+var (
+	sqlPlanCache      sync.Map
+	sqlPlanCacheCount atomic.Int64
+)
 
 func (v *sqlView) mapQueryToStorage(q Query) Query {
 	if v == nil || v.base == nil || !v.base.fieldMappingEnabled() {
@@ -144,39 +156,60 @@ func (v *sqlView) Count(args ...Any) int64 {
 		v.base.setError(nil)
 		return total
 	}
-	builder := NewSQLBuilder(v.base.conn.Dialect())
-	v.bindBuilder(builder, q)
-	from, joins, err := v.buildFrom(q, builder)
+	if v.base.cacheEnabled() {
+		key := v.countCacheKey(q)
+		if key != "" {
+			statsFor(v.base.inst.Name).CacheMiss.Add(1)
+			val, shared, err := cacheSingleflight(v.base.inst.Name, key, func() (cacheValue, error) {
+				if total, ok := v.loadCountCache(q); ok {
+					return cacheValue{total: total}, nil
+				}
+				total, err := v.countWithQuery(q)
+				if err != nil {
+					return cacheValue{}, err
+				}
+				v.storeCountCache(q, total)
+				return cacheValue{total: total}, nil
+			})
+			if err != nil {
+				v.base.setError(err)
+				return 0
+			}
+			if shared {
+				statsFor(v.base.inst.Name).CacheHit.Add(1)
+			}
+			v.base.setError(nil)
+			return val.total
+		}
+	}
+	total, err := v.countWithQuery(q)
 	if err != nil {
-		statsFor(v.base.inst.Name).Errors.Add(1)
-		v.base.setError(wrapErr(v.name+".count.from", ErrInvalidQuery, err))
+		v.base.setError(err)
 		return 0
 	}
-	where, params, err := builder.CompileWhere(q)
+	v.storeCountCache(q, total)
+	v.base.setError(nil)
+	return total
+}
+
+func (v *sqlView) countWithQuery(q Query) (int64, error) {
+	plan, err := v.buildSQLPlan("count", q)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		v.base.setError(wrapErr(v.name+".count.where", ErrInvalidQuery, err))
-		return 0
-	}
-	sql := "SELECT COUNT(1) FROM " + from + joins + " WHERE " + where
-	if len(q.Group) > 0 {
-		sql = "SELECT COUNT(1) FROM (SELECT 1 FROM " + from + joins + " WHERE " + where + BuildGroupBy(q.Group, v.base.conn.Dialect()) + ") _g"
+		return 0, wrapErr(v.name+".count.plan", ErrInvalidQuery, err)
 	}
 	start := time.Now()
 	var total int64
 	ctx, cancel := v.base.opContext(15 * time.Second)
 	defer cancel()
-	err = v.base.currentExec().QueryRowContext(ctx, sql, toInterfaces(params)...).Scan(&total)
+	err = v.base.currentExec().QueryRowContext(ctx, plan.SQL, toInterfaces(plan.Params)...).Scan(&total)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		v.base.setError(wrapErr(v.name+".count.query", ErrInvalidQuery, classifySQLError(err)))
-		return 0
+		return 0, wrapErr(v.name+".count.query", ErrInvalidQuery, v.base.classifySQLError(err))
 	}
-	v.base.logSlow(sql, params, start)
+	v.base.logSlow(plan.SQL, plan.Params, start)
 	statsFor(v.base.inst.Name).Queries.Add(1)
-	v.storeCountCache(q, total)
-	v.base.setError(nil)
-	return total
+	return total, nil
 }
 
 func (v *sqlView) First(args ...Any) Map {
@@ -403,14 +436,14 @@ func (v *sqlView) Group(field string, args ...Any) []Map {
 	rows, err := v.base.currentExec().QueryContext(ctx, sql, toInterfaces(params)...)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		v.base.setError(wrapErr(v.name+".group.query", ErrInvalidQuery, classifySQLError(err)))
+		v.base.setError(wrapErr(v.name+".group.query", ErrInvalidQuery, v.base.classifySQLError(err)))
 		return nil
 	}
 	defer rows.Close()
 	items, err := scanMaps(rows)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		v.base.setError(wrapErr(v.name+".group.scan", ErrInvalidQuery, classifySQLError(err)))
+		v.base.setError(wrapErr(v.name+".group.scan", ErrInvalidQuery, v.base.classifySQLError(err)))
 		return nil
 	}
 	statsFor(v.base.inst.Name).Queries.Add(1)
@@ -428,78 +461,55 @@ func (v *sqlView) queryWithQuery(q Query) ([]Map, error) {
 		statsFor(v.base.inst.Name).CacheHit.Add(1)
 		return items, nil
 	}
-
-	builder := NewSQLBuilder(v.base.conn.Dialect())
-	v.bindBuilder(builder, q)
-	from, joins, err := v.buildFrom(q, builder)
-	if err != nil {
-		return nil, err
-	}
-	where, params, err := builder.CompileWhere(q)
-	if err != nil {
-		return nil, err
-	}
-
-	selectExpr := "*"
-	if len(q.Aggs) > 0 {
-		parts := make([]string, 0, len(q.Aggs)+len(q.Select))
-		for _, agg := range q.Aggs {
-			expr, err := compileAgg(v.base.conn.Dialect(), agg)
+	if v.base.cacheEnabled() {
+		key := v.queryCacheKey(q)
+		if key != "" {
+			statsFor(v.base.inst.Name).CacheMiss.Add(1)
+			val, shared, err := cacheSingleflight(v.base.inst.Name, key, func() (cacheValue, error) {
+				if items, ok := v.loadQueryCache(q); ok {
+					return cacheValue{items: items}, nil
+				}
+				items, err := v.queryDB(q)
+				if err != nil {
+					return cacheValue{}, err
+				}
+				v.storeQueryCache(q, items)
+				return cacheValue{items: items}, nil
+			})
 			if err != nil {
 				return nil, err
 			}
-			parts = append(parts, expr+" AS "+v.base.conn.Dialect().Quote(agg.Alias))
-		}
-		for _, field := range q.Select {
-			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
-		}
-		selectExpr = strings.Join(parts, ",")
-	} else if len(q.Select) > 0 {
-		parts := make([]string, 0, len(q.Select))
-		for _, field := range q.Select {
-			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
-		}
-		selectExpr = strings.Join(parts, ",")
-	}
-
-	sql := "SELECT " + selectExpr + " FROM " + from + joins + " WHERE " + where
-	if len(q.Group) > 0 {
-		sql += BuildGroupBy(q.Group, v.base.conn.Dialect())
-		if q.Having != nil {
-			havingSQL, err := builder.CompileExpr(q.Having)
-			if err != nil {
-				return nil, err
+			if shared {
+				statsFor(v.base.inst.Name).CacheHit.Add(1)
 			}
-			params = builder.Args()
-			sql += " HAVING " + havingSQL
+			return cloneMaps(val.items), nil
 		}
 	}
-	orderBy, err := v.buildOrderBy(q)
+	return v.queryDB(q)
+}
+
+func (v *sqlView) queryDB(q Query) ([]Map, error) {
+	plan, err := v.buildSQLPlan("query", q)
 	if err != nil {
 		return nil, err
 	}
-	sql += orderBy
-	sql += BuildLimitOffset(q, len(params)+1, v.base.conn.Dialect(), &params)
-
-	sql = v.cacheSQL(sql, q)
 	start := time.Now()
 	ctx, cancel := v.base.opContext(30 * time.Second)
 	defer cancel()
-	rows, err := v.base.currentExec().QueryContext(ctx, sql, toInterfaces(params)...)
+	rows, err := v.base.currentExec().QueryContext(ctx, plan.SQL, toInterfaces(plan.Params)...)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return nil, wrapErr(v.name+".query.db", ErrInvalidQuery, classifySQLError(err))
+		return nil, wrapErr(v.name+".query.db", ErrInvalidQuery, v.base.classifySQLError(err))
 	}
 	defer rows.Close()
-	v.base.logSlow(sql, params, start)
+	v.base.logSlow(plan.SQL, plan.Params, start)
 	items, err := scanMaps(rows)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return nil, wrapErr(v.name+".query.scan", ErrInvalidQuery, classifySQLError(err))
+		return nil, wrapErr(v.name+".query.scan", ErrInvalidQuery, v.base.classifySQLError(err))
 	}
 	items = v.base.appMaps(items)
 	statsFor(v.base.inst.Name).Queries.Add(1)
-	v.storeQueryCache(q, items)
 	return items, nil
 }
 
@@ -509,66 +519,17 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 		return infra.Fail.With(err.Error())
 	}
 
-	builder := NewSQLBuilder(v.base.conn.Dialect())
-	v.bindBuilder(builder, q)
-	from, joins, err := v.buildFrom(q, builder)
+	sqlText, params, err := v.streamSQLPlan(q)
 	if err != nil {
 		return infra.Fail.With(err.Error())
 	}
-	where, params, err := builder.CompileWhere(q)
-	if err != nil {
-		return infra.Fail.With(err.Error())
-	}
-
-	selectExpr := "*"
-	if len(q.Aggs) > 0 {
-		parts := make([]string, 0, len(q.Aggs)+len(q.Select))
-		for _, agg := range q.Aggs {
-			expr, err := compileAgg(v.base.conn.Dialect(), agg)
-			if err != nil {
-				return infra.Fail.With(err.Error())
-			}
-			parts = append(parts, expr+" AS "+v.base.conn.Dialect().Quote(agg.Alias))
-		}
-		for _, field := range q.Select {
-			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
-		}
-		selectExpr = strings.Join(parts, ",")
-	} else if len(q.Select) > 0 {
-		parts := make([]string, 0, len(q.Select))
-		for _, field := range q.Select {
-			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
-		}
-		selectExpr = strings.Join(parts, ",")
-	}
-
-	sqlText := "SELECT " + selectExpr + " FROM " + from + joins + " WHERE " + where
-	if len(q.Group) > 0 {
-		sqlText += BuildGroupBy(q.Group, v.base.conn.Dialect())
-		if q.Having != nil {
-			havingSQL, err := builder.CompileExpr(q.Having)
-			if err != nil {
-				return infra.Fail.With(err.Error())
-			}
-			params = builder.Args()
-			sqlText += " HAVING " + havingSQL
-		}
-	}
-	orderBy, err := v.buildOrderBy(q)
-	if err != nil {
-		return infra.Fail.With(err.Error())
-	}
-	sqlText += orderBy
-	sqlText += BuildLimitOffset(q, len(params)+1, v.base.conn.Dialect(), &params)
-
-	sqlText = v.cacheSQL(sqlText, q)
 	start := time.Now()
 	ctx, cancel := v.base.opContext(30 * time.Second)
 	defer cancel()
 	rows, err := v.base.currentExec().QueryContext(ctx, sqlText, toInterfaces(params)...)
 	if err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return infra.Fail.With(wrapErr(v.name+".range.query", ErrInvalidQuery, classifySQLError(err)).Error())
+		return infra.Fail.With(wrapErr(v.name+".range.query", ErrInvalidQuery, v.base.classifySQLError(err)).Error())
 	}
 	defer rows.Close()
 	v.base.logSlow(sqlText, params, start)
@@ -613,24 +574,252 @@ func (v *sqlView) streamWithQuery(q Query, next ScanFunc) Res {
 
 	if err := rows.Err(); err != nil {
 		statsFor(v.base.inst.Name).Errors.Add(1)
-		return infra.Fail.With(wrapErr(v.name+".range.rows", ErrInvalidQuery, classifySQLError(err)).Error())
+		return infra.Fail.With(wrapErr(v.name+".range.rows", ErrInvalidQuery, v.base.classifySQLError(err)).Error())
 	}
 	statsFor(v.base.inst.Name).Queries.Add(1)
 	return infra.OK
 }
 
-func (v *sqlView) cacheSQL(sqlText string, q Query) string {
-	key := q.cacheKey(v.base.conn.Dialect().Name(), v.name)
-	if key == "" {
-		return sqlText
+func (v *sqlView) streamSQLPlan(q Query) (string, []Any, error) {
+	plan, err := v.buildSQLPlan("stream", q)
+	return plan.SQL, plan.Params, err
+}
+
+func (v *sqlView) buildSQLPlan(kind string, q Query) (sqlPlan, error) {
+	if sql, params, ok := v.loadSQLPlan(kind, q); ok {
+		return sqlPlan{SQL: sql, Params: params}, nil
 	}
-	sqlPlanCache.Store(key, sqlText)
-	if cached, ok := sqlPlanCache.Load(key); ok {
-		if s, ok := cached.(string); ok {
-			return s
+	plan, err := v.compileSQLPlan(kind, q)
+	if err != nil {
+		return sqlPlan{}, err
+	}
+	v.storeSQLPlan(kind, q, plan.SQL, plan.Params)
+	return plan, nil
+}
+
+func (v *sqlView) compileSQLPlan(kind string, q Query) (sqlPlan, error) {
+	builder := NewSQLBuilder(v.base.conn.Dialect())
+	v.bindBuilder(builder, q)
+	from, joins, err := v.buildFrom(q, builder)
+	if err != nil {
+		return sqlPlan{}, err
+	}
+	where, params, err := builder.CompileWhere(q)
+	if err != nil {
+		return sqlPlan{}, err
+	}
+	if kind == "count" {
+		sqlText := "SELECT COUNT(1) FROM " + from + joins + " WHERE " + where
+		if len(q.Group) > 0 {
+			sqlText = "SELECT COUNT(1) FROM (SELECT 1 FROM " + from + joins + " WHERE " + where + BuildGroupBy(q.Group, v.base.conn.Dialect()) + ") _g"
+		}
+		return sqlPlan{SQL: sqlText, Params: params}, nil
+	}
+	selectExpr, err := v.buildSelectExpr(q)
+	if err != nil {
+		return sqlPlan{}, err
+	}
+	sqlText := "SELECT " + selectExpr + " FROM " + from + joins + " WHERE " + where
+	if len(q.Group) > 0 {
+		sqlText += BuildGroupBy(q.Group, v.base.conn.Dialect())
+		if q.Having != nil {
+			havingSQL, err := builder.CompileExpr(q.Having)
+			if err != nil {
+				return sqlPlan{}, err
+			}
+			params = builder.Args()
+			sqlText += " HAVING " + havingSQL
 		}
 	}
-	return sqlText
+	orderBy, err := v.buildOrderBy(q)
+	if err != nil {
+		return sqlPlan{}, err
+	}
+	sqlText += orderBy
+	sqlText += BuildLimitOffset(q, len(params)+1, v.base.conn.Dialect(), &params)
+	return sqlPlan{SQL: sqlText, Params: params}, nil
+}
+
+func (v *sqlView) buildSelectExpr(q Query) (string, error) {
+	if len(q.Aggs) > 0 {
+		parts := make([]string, 0, len(q.Aggs)+len(q.Select))
+		for _, agg := range q.Aggs {
+			expr, err := compileAgg(v.base.conn.Dialect(), agg)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, expr+" AS "+v.base.conn.Dialect().Quote(agg.Alias))
+		}
+		for _, field := range q.Select {
+			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
+		}
+		return strings.Join(parts, ","), nil
+	}
+	if len(q.Select) > 0 {
+		parts := make([]string, 0, len(q.Select))
+		for _, field := range q.Select {
+			parts = append(parts, quoteField(v.base.conn.Dialect(), field))
+		}
+		return strings.Join(parts, ","), nil
+	}
+	return "*", nil
+}
+
+func (v *sqlView) loadSQLPlan(kind string, q Query) (string, []Any, bool) {
+	if v == nil || v.base == nil || v.base.planCacheCapacity() <= 0 {
+		return "", nil, false
+	}
+	key := v.sqlPlanKey(kind, q)
+	if key == "" {
+		return "", nil, false
+	}
+	raw, ok := sqlPlanCache.Load(key)
+	if !ok {
+		return "", nil, false
+	}
+	plan, ok := raw.(*sqlPlan)
+	if !ok || strings.TrimSpace(plan.SQL) == "" {
+		return "", nil, false
+	}
+	plan.Hits.Add(1)
+	plan.UsedAt.Store(time.Now().UnixNano())
+	return plan.SQL, cloneAnySlice(plan.Params), true
+}
+
+func (v *sqlView) storeSQLPlan(kind string, q Query, sqlText string, params []Any) {
+	capacity := 0
+	if v != nil && v.base != nil {
+		capacity = v.base.planCacheCapacity()
+	}
+	if capacity <= 0 {
+		return
+	}
+	key := v.sqlPlanKey(kind, q)
+	if key == "" || strings.TrimSpace(sqlText) == "" {
+		return
+	}
+	plan := &sqlPlan{SQL: sqlText, Params: cloneAnySlice(params)}
+	plan.Hits.Store(1)
+	plan.UsedAt.Store(time.Now().UnixNano())
+	actual, loaded := sqlPlanCache.LoadOrStore(key, plan)
+	if loaded {
+		if cached, ok := actual.(*sqlPlan); ok {
+			cached.Hits.Add(1)
+			cached.UsedAt.Store(time.Now().UnixNano())
+		}
+		return
+	}
+	if !loaded {
+		sqlPlanCacheCount.Add(1)
+	}
+	evictSQLPlans(capacity)
+}
+
+func evictSQLPlans(capacity int) {
+	if capacity <= 0 {
+		return
+	}
+	for sqlPlanCacheCount.Load() > int64(capacity) {
+		key, ok := sqlPlanVictimKey()
+		if !ok {
+			return
+		}
+		if _, loaded := sqlPlanCache.LoadAndDelete(key); loaded {
+			sqlPlanCacheCount.Add(-1)
+			continue
+		}
+		if sqlPlanCacheCount.Load() <= int64(capacity) {
+			return
+		}
+	}
+}
+
+func sqlPlanVictimKey() (Any, bool) {
+	var victim Any
+	var victimHits int64
+	var victimUsedAt int64
+	found := false
+	sqlPlanCache.Range(func(k, v any) bool {
+		plan, ok := v.(*sqlPlan)
+		if !ok || k == nil {
+			return true
+		}
+		hits := plan.Hits.Load()
+		usedAt := plan.UsedAt.Load()
+		if !found || hits < victimHits || (hits == victimHits && usedAt < victimUsedAt) {
+			victim = k
+			victimHits = hits
+			victimUsedAt = usedAt
+			found = true
+		}
+		return true
+	})
+	return victim, found
+}
+
+func (v *sqlView) sqlPlanKey(kind string, q Query) string {
+	if v == nil || v.base == nil || v.base.conn == nil {
+		return ""
+	}
+	d := v.base.conn.Dialect()
+	instName := ""
+	if v.base.inst != nil {
+		instName = v.base.inst.Name
+	}
+	parts := []string{
+		"kind=" + strings.TrimSpace(kind),
+		"dialect=" + strings.ToLower(strings.TrimSpace(d.Name())),
+		fmt.Sprintf("ilike=%t", d.SupportsILike()),
+		fmt.Sprintf("returning=%t", d.SupportsReturning()),
+		"instance=" + strings.TrimSpace(instName),
+		"name=" + strings.TrimSpace(v.name),
+		"schema=" + strings.TrimSpace(v.schema),
+		"source=" + strings.TrimSpace(v.source),
+		"key=" + strings.TrimSpace(v.key),
+		fmt.Sprintf("mapping=%t", v.base.fieldMappingEnabled()),
+		"fields=" + fieldsPlanSignature(v.fields),
+		"query=" + QuerySignature(q),
+	}
+	return strings.Join(parts, "|")
+}
+
+func cloneAnySlice(in []Any) []Any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Any, len(in))
+	copy(out, in)
+	return out
+}
+
+func fieldsPlanSignature(fields Vars) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		cfg := fields[k]
+		flags := make([]string, 0, len(cfg.Setting))
+		for key, value := range cfg.Setting {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "array", "multiple":
+				flags = append(flags, key+"="+stableAnySignature(value))
+			}
+		}
+		sort.Strings(flags)
+		parts = append(parts, strings.Join([]string{
+			k,
+			strings.ToLower(strings.TrimSpace(cfg.Type)),
+			strings.Join(flags, ","),
+			fieldsPlanSignature(cfg.Children),
+		}, ":"))
+	}
+	return strings.Join(parts, ";")
 }
 
 func (v *sqlView) bindBuilder(builder *SQLBuilder, q Query) {
@@ -643,6 +832,28 @@ func (v *sqlView) bindBuilder(builder *SQLBuilder, q Query) {
 	builder.isJSONField = v.isJSONField
 	builder.isArrayField = v.isArrayField
 	builder.toStorage = v.base.storageField
+	builder.bindField = v.bindFieldValue
+}
+
+func (v *sqlView) bindFieldValue(name string, value Any) Any {
+	name = strings.TrimSpace(name)
+	if name == "" || len(v.fields) == 0 {
+		return value
+	}
+	candidates := []string{name}
+	if v.base.fieldMappingEnabled() {
+		candidates = append(candidates, v.base.appField(name), v.base.storageField(name))
+	}
+	for _, one := range candidates {
+		cfg, ok := lookupField(v.fields, one)
+		if !ok {
+			continue
+		}
+		if out, yes := bindStructuredValue(v.base.conn.Dialect(), cfg, value); yes {
+			return out
+		}
+	}
+	return value
 }
 
 func (v *sqlView) buildOrderBy(q Query) (string, error) {
@@ -782,10 +993,6 @@ func (v *sqlView) buildJSONSortExpr(field string, path []string, dialect string)
 	}
 }
 
-func (q Query) cacheKey(dialect, name string) string {
-	return dialect + "|" + name + "|" + QuerySignature(q)
-}
-
 func (v *sqlView) buildFrom(q Query, builder *SQLBuilder) (string, string, error) {
 	from := v.base.sourceExpr(v.schema, v.source)
 	if len(q.Joins) == 0 {
@@ -858,6 +1065,10 @@ func (v *sqlView) decodeStructuredValues(item Map) Map {
 	if len(item) == 0 || len(v.fields) == 0 {
 		return item
 	}
+	var d Dialect
+	if v.base != nil && v.base.conn != nil {
+		d = v.base.conn.Dialect()
+	}
 	out := Map{}
 	for key, value := range item {
 		cfg, ok := lookupField(v.fields, key)
@@ -865,56 +1076,119 @@ func (v *sqlView) decodeStructuredValues(item Map) Map {
 			out[key] = value
 			continue
 		}
-		out[key] = decodeStructuredFieldValue(cfg.Type, value)
+		out[key] = decodeStructuredFieldValue(d, cfg, value)
 	}
 	return out
 }
 
-func decodeStructuredFieldValue(typeName string, value Any) Any {
-	text, ok := value.(string)
-	if !ok {
-		return value
+func decodeStructuredFieldValue(d Dialect, cfg Var, value Any) Any {
+	if out, ok := decodeStructuredValue(d, cfg, value); ok {
+		return out
 	}
-	kind := strings.ToLower(strings.TrimSpace(typeName))
-	if kind == "" {
-		return value
-	}
-	if !(strings.HasPrefix(kind, "[") || strings.HasPrefix(kind, "array") || kind == "json" || kind == "jsonb" || strings.HasPrefix(kind, "map")) {
-		return value
-	}
-	raw := strings.TrimSpace(text)
-	if raw == "" {
-		return value
-	}
-	if !((strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]")) || (strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}"))) {
-		return value
-	}
-	var parsed Any
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return value
-	}
-	if isArrayTypeName(kind) {
-		if strings.Contains(kind, "uint") {
-			if out, ok := toInt64Slice(parsed, true); ok {
-				return out
-			}
-		}
-		if strings.Contains(kind, "int") {
-			if out, ok := toInt64Slice(parsed, false); ok {
-				return out
-			}
-		}
-		if strings.Contains(kind, "float") || strings.Contains(kind, "double") || strings.Contains(kind, "decimal") || strings.Contains(kind, "number") {
-			if out, ok := toFloat64Slice(parsed); ok {
-				return out
-			}
-		}
-	}
-	return parsed
+	return value
 }
 
-func isArrayTypeName(kind string) bool {
-	return strings.HasPrefix(kind, "[") || strings.HasPrefix(kind, "array")
+func normalizeParsedArrayValue(kind string, value Any) Any {
+	items, ok := value.([]Any)
+	if !ok {
+		switch {
+		case strings.Contains(kind, "uint"):
+			if n, ok := toInt64Value(value); ok {
+				if n < 0 {
+					n = 0
+				}
+				return n
+			}
+		case strings.Contains(kind, "int"):
+			if n, ok := toInt64Value(value); ok {
+				return n
+			}
+		case strings.Contains(kind, "float") || strings.Contains(kind, "double") || strings.Contains(kind, "decimal") || strings.Contains(kind, "number"):
+			if n, ok := toFloat64Value(value); ok {
+				return n
+			}
+		case strings.Contains(kind, "bool"):
+			if b, ok := value.(bool); ok {
+				return b
+			}
+			if s, ok := value.(string); ok {
+				if b, yes := parseBool(s); yes {
+					return b
+				}
+			}
+		case strings.Contains(kind, "string"), strings.Contains(kind, "text"):
+			if s, ok := value.(string); ok {
+				return s
+			}
+		}
+		return value
+	}
+	normalized := make([]Any, 0, len(items))
+	for _, item := range items {
+		normalized = append(normalized, normalizeParsedArrayValue(kind, item))
+	}
+	if typed, ok := homogenizeTypedSlice(normalized); ok {
+		return typed
+	}
+	return normalized
+}
+
+func homogenizeTypedSlice(items []Any) (Any, bool) {
+	if len(items) == 0 {
+		return []Any{}, true
+	}
+	if allNil(items) {
+		return items, true
+	}
+	var elemType reflect.Type
+	for _, item := range items {
+		if item == nil {
+			return items, false
+		}
+		t := reflect.TypeOf(item)
+		if elemType == nil {
+			elemType = t
+			continue
+		}
+		if t != elemType {
+			return items, false
+		}
+	}
+	if elemType == nil {
+		return items, true
+	}
+	out := reflect.MakeSlice(reflect.SliceOf(elemType), len(items), len(items))
+	for i, item := range items {
+		out.Index(i).Set(reflect.ValueOf(item))
+	}
+	return out.Interface(), true
+}
+
+func allNil(items []Any) bool {
+	for _, item := range items {
+		if item != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func isArrayVar(cfg Var) bool {
+	kind := strings.ToLower(strings.TrimSpace(cfg.Type))
+	if strings.HasPrefix(kind, "[") || strings.HasPrefix(kind, "array") {
+		return true
+	}
+	if cfg.Setting == nil {
+		return false
+	}
+	for _, key := range []string{"array", "multiple"} {
+		if raw, ok := cfg.Setting[key]; ok {
+			if on, yes := parseBool(raw); yes && on {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func toInt64Slice(value Any, nonNegative bool) ([]int64, bool) {
@@ -1045,8 +1319,7 @@ func (v *sqlView) loadQueryCache(q Query) ([]Map, bool) {
 	if !v.base.cacheEnabled() {
 		return nil, false
 	}
-	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
-	key := fmt.Sprintf("q:%s:%s", token, makeCacheKey(v.base, v.name, q))
+	key := v.queryCacheKey(q)
 	raw, ok := cacheMap(v.base.inst.Name).Load(key)
 	if !ok {
 		return nil, false
@@ -1070,8 +1343,7 @@ func (v *sqlView) storeQueryCache(q Query, items []Map) {
 	if ttl <= 0 {
 		return
 	}
-	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
-	key := fmt.Sprintf("q:%s:%s", token, makeCacheKey(v.base, v.name, q))
+	key := v.queryCacheKey(q)
 	tables := v.cacheTables(q)
 	cacheStoreWithCap(v.base.inst.Name, key, cacheValue{
 		expireAt: time.Now().Add(ttl).UnixNano(),
@@ -1084,8 +1356,7 @@ func (v *sqlView) loadCountCache(q Query) (int64, bool) {
 	if !v.base.cacheEnabled() {
 		return 0, false
 	}
-	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
-	key := fmt.Sprintf("c:%s:%s", token, makeCacheKey(v.base, v.name, q))
+	key := v.countCacheKey(q)
 	raw, ok := cacheMap(v.base.inst.Name).Load(key)
 	if !ok {
 		return 0, false
@@ -1109,13 +1380,22 @@ func (v *sqlView) storeCountCache(q Query, total int64) {
 	if ttl <= 0 {
 		return
 	}
-	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
-	key := fmt.Sprintf("c:%s:%s", token, makeCacheKey(v.base, v.name, q))
+	key := v.countCacheKey(q)
 	tables := v.cacheTables(q)
 	cacheStoreWithCap(v.base.inst.Name, key, cacheValue{
 		expireAt: time.Now().Add(ttl).UnixNano(),
 		total:    total,
 	}, v.base.cacheCapacity(), tables)
+}
+
+func (v *sqlView) queryCacheKey(q Query) string {
+	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
+	return fmt.Sprintf("q:%s:%s", token, makeCacheKey(v.base, v.name, q))
+}
+
+func (v *sqlView) countCacheKey(q Query) string {
+	token := cacheToken(v.base.inst.Name, v.cacheTables(q))
+	return fmt.Sprintf("c:%s:%s", token, makeCacheKey(v.base, v.name, q))
 }
 
 func (v *sqlView) cacheTables(q Query) []string {

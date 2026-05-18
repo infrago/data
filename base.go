@@ -44,13 +44,44 @@ type (
 		TTL      time.Duration
 	}
 
-	MigrateAction struct {
+	columnDiff struct {
+		Field  string
+		Kind   string
+		From   string
+		To     string
+		SQL    string
+		Apply  bool
+		Risk   string
+		Detail string
+	}
+
+	MigrateDelta struct {
+		Field  string `json:"field"`
 		Kind   string `json:"kind"`
-		Target string `json:"target"`
-		SQL    string `json:"sql,omitempty"`
+		From   string `json:"from,omitempty"`
+		To     string `json:"to,omitempty"`
 		Apply  bool   `json:"apply"`
 		Risk   string `json:"risk,omitempty"`
 		Detail string `json:"detail,omitempty"`
+	}
+
+	columnInfo struct {
+		Name        string
+		Type        string
+		Nullable    bool
+		HasNullable bool
+		Default     string
+		HasDefault  bool
+	}
+
+	MigrateAction struct {
+		Kind   string         `json:"kind"`
+		Target string         `json:"target"`
+		SQL    string         `json:"sql,omitempty"`
+		Apply  bool           `json:"apply"`
+		Risk   string         `json:"risk,omitempty"`
+		Detail string         `json:"detail,omitempty"`
+		Diffs  []MigrateDelta `json:"diffs,omitempty"`
 	}
 
 	MigrateReport struct {
@@ -261,7 +292,7 @@ func (b *sqlBase) SequenceMany(key string, count, offset, step int64) ([]int64, 
 	}
 
 	if err := b.ensureSequenceStore(); err != nil {
-		err = wrapErr("sequence.ensure", ErrDriver, classifySQLError(err))
+		err = wrapErr("sequence.ensure", ErrDriver, b.classifySQLError(err))
 		b.setError(err)
 		return nil, err
 	}
@@ -269,7 +300,7 @@ func (b *sqlBase) SequenceMany(key string, count, offset, step int64) ([]int64, 
 	if b.tx != nil {
 		items, err := b.sequenceRange(key, count, offset, step)
 		if err != nil {
-			err = wrapErr("sequence.next", ErrDriver, classifySQLError(err))
+			err = wrapErr("sequence.next", ErrDriver, b.classifySQLError(err))
 			b.setError(err)
 			return nil, err
 		}
@@ -278,7 +309,7 @@ func (b *sqlBase) SequenceMany(key string, count, offset, step int64) ([]int64, 
 	}
 
 	if err := b.beginTx(false); err != nil {
-		err = wrapErr("sequence.begin", ErrTxFailed, classifySQLError(err))
+		err = wrapErr("sequence.begin", ErrTxFailed, b.classifySQLError(err))
 		b.setError(err)
 		return nil, err
 	}
@@ -286,13 +317,13 @@ func (b *sqlBase) SequenceMany(key string, count, offset, step int64) ([]int64, 
 	items, err := b.sequenceRange(key, count, offset, step)
 	if err != nil {
 		_ = b.Rollback()
-		err = wrapErr("sequence.next", ErrDriver, classifySQLError(err))
+		err = wrapErr("sequence.next", ErrDriver, b.classifySQLError(err))
 		b.setError(err)
 		return nil, err
 	}
 	if err := b.Commit(); err != nil {
 		_ = b.Rollback()
-		err = wrapErr("sequence.commit", ErrTxFailed, classifySQLError(err))
+		err = wrapErr("sequence.commit", ErrTxFailed, b.classifySQLError(err))
 		b.setError(err)
 		return nil, err
 	}
@@ -328,6 +359,13 @@ func (b *sqlBase) opContext(defaultTimeout time.Duration) (context.Context, cont
 	return base, func() {}
 }
 
+func (b *sqlBase) classifySQLError(err error) error {
+	if b == nil || b.conn == nil {
+		return classifySQLError(err)
+	}
+	return classifySQLErrorWithDialect(b.conn.Dialect(), err)
+}
+
 func (b *sqlBase) suppressChange() func() {
 	b.mute.Add(1)
 	return func() {
@@ -358,10 +396,53 @@ func (b *sqlBase) watcherKeysEnabled() bool {
 	if b == nil || b.inst == nil || b.inst.Config.Watcher == nil {
 		return false
 	}
-	if v, ok := parseBool(b.inst.Config.Watcher["keys"]); ok {
+	raw := b.inst.Config.Watcher["keys"]
+	if vv, ok := raw.(Map); ok {
+		if v, ok := parseBool(vv["enable"]); ok {
+			return v
+		}
+		return true
+	}
+	if v, ok := parseBool(raw); ok {
 		return v
 	}
 	return false
+}
+
+func (b *sqlBase) watcherKeysBatchSize() int64 {
+	if b == nil || b.inst == nil || b.inst.Config.Watcher == nil {
+		return 0
+	}
+	vv, ok := b.inst.Config.Watcher["keys"].(Map)
+	if !ok {
+		return 0
+	}
+	for _, key := range []string{"batch", "batchSize", "size"} {
+		if raw, ok := vv[key]; ok {
+			if n, yes := parseInt64(raw); yes && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func (b *sqlBase) watcherKeysMaxKeys() int64 {
+	if b == nil || b.inst == nil || b.inst.Config.Watcher == nil {
+		return 0
+	}
+	vv, ok := b.inst.Config.Watcher["keys"].(Map)
+	if !ok {
+		return 0
+	}
+	for _, key := range []string{"max", "limit", "maxKeys"} {
+		if raw, ok := vv[key]; ok {
+			if n, yes := parseInt64(raw); yes && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func txNormalizeResult(res Res) Res {
@@ -408,7 +489,7 @@ func (b *sqlBase) beginTx(readOnly bool) error {
 	if err != nil {
 		cancel()
 		statsFor(b.inst.Name).Errors.Add(1)
-		return wrapErr("tx.begin", ErrTxFailed, classifySQLError(err))
+		return wrapErr("tx.begin", ErrTxFailed, b.classifySQLError(err))
 	}
 	b.tx = tx
 	b.txDone = cancel
@@ -427,7 +508,7 @@ func (b *sqlBase) Commit() error {
 	}
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		return wrapErr("tx.commit", ErrTxFailed, classifySQLError(err))
+		return wrapErr("tx.commit", ErrTxFailed, b.classifySQLError(err))
 	}
 	return nil
 }
@@ -444,7 +525,7 @@ func (b *sqlBase) Rollback() error {
 	}
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		return wrapErr("tx.rollback", ErrTxFailed, classifySQLError(err))
+		return wrapErr("tx.rollback", ErrTxFailed, b.classifySQLError(err))
 	}
 	return nil
 }
@@ -779,8 +860,13 @@ func (b *sqlBase) planTableActions(schema, table, key string, fields Vars, index
 	}
 
 	currentCols := map[string]struct{}{}
+	currentInfo := map[string]columnInfo{}
 	if exists {
 		currentCols, err = b.loadColumns(schema, table)
+		if err != nil {
+			return nil, err
+		}
+		currentInfo, err = b.loadColumnInfo(schema, table)
 		if err != nil {
 			return nil, err
 		}
@@ -813,6 +899,9 @@ func (b *sqlBase) planTableActions(schema, table, key string, fields Vars, index
 		}
 		sqlText := b.buildAddColumnSQL(schema, table, name, desiredCols[name], applyNotNull)
 		actions = append(actions, MigrateAction{Kind: "add_column", Target: table + "." + name, SQL: sqlText, Apply: !opts.DryRun, Risk: migrateActionRisk("add_column")})
+	}
+	if exists {
+		actions = append(actions, b.planColumnDiffActions(schema, table, dbKey, desiredCols, currentInfo, opts)...)
 	}
 
 	desiredIndexes := b.collectIndexes(table, indexes, setting)
@@ -877,7 +966,7 @@ func (b *sqlBase) executeMigrateActions(actions []MigrateAction, opts MigrateOpt
 			continue
 		}
 		err := b.migrateRetry(opts, "migrate.exec."+action.Kind, func() error {
-			_, err := b.currentExec().ExecContext(context.Background(), action.SQL)
+			_, err := b.execSQL(30*time.Second, action.SQL)
 			return err
 		})
 		if err != nil {
@@ -895,7 +984,7 @@ func migrateActionRisk(kind string) string {
 	switch kind {
 	case "drop_column":
 		return "high"
-	case "drop_index":
+	case "drop_index", "alter_column":
 		return "medium"
 	default:
 		return "low"
@@ -981,12 +1070,12 @@ func (b *sqlBase) acquireMigrateLock(opts MigrateOptions) (func(), error) {
 		key := int64(fnvHash("infrago:migrate:" + b.inst.Name))
 		for {
 			var ok bool
-			err := b.currentExec().QueryRowContext(context.Background(), "SELECT pg_try_advisory_lock($1)", key).Scan(&ok)
+			err := b.scanSQL(5*time.Second, "SELECT pg_try_advisory_lock($1)", []any{key}, &ok)
 			if err != nil {
 				return nil, err
 			}
 			if ok {
-				return func() { _, _ = b.currentExec().ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key) }, nil
+				return func() { _, _ = b.execSQL(5*time.Second, "SELECT pg_advisory_unlock($1)", key) }, nil
 			}
 			if time.Now().After(deadline) {
 				return nil, fmt.Errorf("migrate lock timeout after %s", lockTimeout)
@@ -997,12 +1086,12 @@ func (b *sqlBase) acquireMigrateLock(opts MigrateOptions) (func(), error) {
 		lockName := "infrago:data:migrate:" + b.inst.Name
 		for {
 			var ok int
-			err := b.currentExec().QueryRowContext(context.Background(), "SELECT GET_LOCK(?, 0)", lockName).Scan(&ok)
+			err := b.scanSQL(5*time.Second, "SELECT GET_LOCK(?, 0)", []any{lockName}, &ok)
 			if err != nil {
 				return nil, err
 			}
 			if ok == 1 {
-				return func() { _, _ = b.currentExec().ExecContext(context.Background(), "SELECT RELEASE_LOCK(?)", lockName) }, nil
+				return func() { _, _ = b.execSQL(5*time.Second, "SELECT RELEASE_LOCK(?)", lockName) }, nil
 			}
 			if time.Now().After(deadline) {
 				return nil, fmt.Errorf("migrate lock timeout after %s", lockTimeout)
@@ -1017,7 +1106,7 @@ func (b *sqlBase) acquireMigrateLock(opts MigrateOptions) (func(), error) {
 
 func (b *sqlBase) tableExists(schema, table string) (bool, error) {
 	target := b.sourceExpr(schema, table)
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT * FROM "+target+" WHERE 1=0")
+	rows, cancel, err := b.querySQL(10*time.Second, "SELECT * FROM "+target+" WHERE 1=0")
 	if err != nil {
 		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such table") || strings.Contains(msg, "unknown table") {
@@ -1025,6 +1114,7 @@ func (b *sqlBase) tableExists(schema, table string) (bool, error) {
 		}
 		return false, err
 	}
+	defer cancel()
 	_ = rows.Close()
 	return true, nil
 }
@@ -1231,10 +1321,11 @@ func (b *sqlBase) loadIndexNames(schema, table string) (map[string]struct{}, err
 		if schemaName == "" {
 			schemaName = "public"
 		}
-		rows, err := b.currentExec().QueryContext(context.Background(), query, schemaName, table)
+		rows, cancel, err := b.querySQL(10*time.Second, query, schemaName, table)
 		if err != nil {
 			return nil, err
 		}
+		defer cancel()
 		defer rows.Close()
 		for rows.Next() {
 			var name string
@@ -1246,10 +1337,11 @@ func (b *sqlBase) loadIndexNames(schema, table string) (map[string]struct{}, err
 		return out, rows.Err()
 	case strings.Contains(dn, "mysql"):
 		query := "SELECT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? GROUP BY INDEX_NAME"
-		rows, err := b.currentExec().QueryContext(context.Background(), query, table)
+		rows, cancel, err := b.querySQL(10*time.Second, query, table)
 		if err != nil {
 			return nil, err
 		}
+		defer cancel()
 		defer rows.Close()
 		for rows.Next() {
 			var name string
@@ -1260,7 +1352,7 @@ func (b *sqlBase) loadIndexNames(schema, table string) (map[string]struct{}, err
 		}
 		return out, rows.Err()
 	default:
-		rows, err := b.currentExec().QueryContext(context.Background(), "PRAGMA index_list("+strconv.Quote(table)+")")
+		rows, cancel, err := b.querySQL(10*time.Second, "PRAGMA index_list("+strconv.Quote(table)+")")
 		if err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "no such table") {
@@ -1268,6 +1360,7 @@ func (b *sqlBase) loadIndexNames(schema, table string) (map[string]struct{}, err
 			}
 			return nil, err
 		}
+		defer cancel()
 		defer rows.Close()
 		for rows.Next() {
 			var seq int
@@ -1407,6 +1500,28 @@ func (b *sqlBase) currentExec() execer {
 		return b.tx
 	}
 	return b.conn.DB()
+}
+
+func (b *sqlBase) execSQL(timeout time.Duration, query string, args ...any) (sql.Result, error) {
+	ctx, cancel := b.opContext(timeout)
+	defer cancel()
+	return b.currentExec().ExecContext(ctx, query, args...)
+}
+
+func (b *sqlBase) querySQL(timeout time.Duration, query string, args ...any) (*sql.Rows, context.CancelFunc, error) {
+	ctx, cancel := b.opContext(timeout)
+	rows, err := b.currentExec().QueryContext(ctx, query, args...)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return rows, cancel, nil
+}
+
+func (b *sqlBase) scanSQL(timeout time.Duration, query string, args []any, dest ...any) error {
+	ctx, cancel := b.opContext(timeout)
+	defer cancel()
+	return b.currentExec().QueryRowContext(ctx, query, args...).Scan(dest...)
 }
 
 func (b *sqlBase) ensureSequenceStore() error {
@@ -1588,14 +1703,14 @@ func (b *sqlBase) Raw(query string, args ...Any) []Map {
 	rows, err := b.currentExec().QueryContext(ctx, query, toInterfaces(args)...)
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		b.setError(wrapErr("raw.query", ErrInvalidQuery, classifySQLError(err)))
+		b.setError(wrapErr("raw.query", ErrInvalidQuery, b.classifySQLError(err)))
 		return nil
 	}
 	defer rows.Close()
 	items, err := scanMaps(rows)
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		b.setError(wrapErr("raw.scan", ErrInvalidQuery, classifySQLError(err)))
+		b.setError(wrapErr("raw.scan", ErrInvalidQuery, b.classifySQLError(err)))
 		return nil
 	}
 	statsFor(b.inst.Name).Queries.Add(1)
@@ -1617,7 +1732,7 @@ func (b *sqlBase) Exec(query string, args ...Any) int64 {
 	res, err := b.currentExec().ExecContext(ctx, query, toInterfaces(args)...)
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		b.setError(wrapErr("exec", ErrInvalidQuery, classifySQLError(err)))
+		b.setError(wrapErr("exec", ErrInvalidQuery, b.classifySQLError(err)))
 		return 0
 	}
 	b.logSlow(query, args, start)
@@ -1630,7 +1745,7 @@ func (b *sqlBase) Exec(query string, args ...Any) int64 {
 	affected, err := res.RowsAffected()
 	if err != nil {
 		statsFor(b.inst.Name).Errors.Add(1)
-		b.setError(wrapErr("exec.rows", ErrInvalidQuery, classifySQLError(err)))
+		b.setError(wrapErr("exec.rows", ErrInvalidQuery, b.classifySQLError(err)))
 		return 0
 	}
 	b.setError(nil)
@@ -1761,7 +1876,7 @@ func (b *sqlBase) migrateTable(schema, table, key string, fields Vars, indexes [
 		cols = append(cols, "PRIMARY KEY ("+d.Quote(key)+")")
 	}
 	sqlText := "CREATE TABLE IF NOT EXISTS " + source + " (" + strings.Join(cols, ",") + ")"
-	if _, err := b.currentExec().ExecContext(context.Background(), sqlText); err != nil {
+	if _, err := b.execSQL(30*time.Second, sqlText); err != nil {
 		return err
 	}
 	if err := b.migrateColumns(schema, table, key, fields, setting); err != nil {
@@ -1811,7 +1926,7 @@ func (b *sqlBase) migrateColumns(schema, table, key string, fields Vars, setting
 		}
 		def += migrateColumnExtras(d, field)
 		sqlText := "ALTER TABLE " + target + " ADD COLUMN " + def
-		if _, err := b.currentExec().ExecContext(context.Background(), sqlText); err != nil {
+		if _, err := b.execSQL(30*time.Second, sqlText); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
 				continue
@@ -1824,10 +1939,11 @@ func (b *sqlBase) migrateColumns(schema, table, key string, fields Vars, setting
 
 func (b *sqlBase) loadColumns(schema, table string) (map[string]struct{}, error) {
 	target := b.sourceExpr(schema, table)
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT * FROM "+target+" WHERE 1=0")
+	rows, cancel, err := b.querySQL(10*time.Second, "SELECT * FROM "+target+" WHERE 1=0")
 	if err != nil {
 		return nil, err
 	}
+	defer cancel()
 	defer rows.Close()
 
 	cols, err := rows.Columns()
@@ -1839,6 +1955,358 @@ func (b *sqlBase) loadColumns(schema, table string) (map[string]struct{}, error)
 		out[strings.ToLower(col)] = struct{}{}
 	}
 	return out, nil
+}
+
+func (b *sqlBase) loadColumnInfo(schema, table string) (map[string]columnInfo, error) {
+	if b == nil || b.conn == nil {
+		return nil, errInvalidConnection
+	}
+	dialect := strings.ToLower(strings.TrimSpace(b.conn.Dialect().Name()))
+	switch {
+	case dialect == "pgsql" || dialect == "postgres":
+		return b.loadPostgresColumnInfo(schema, table)
+	case strings.Contains(dialect, "mysql"):
+		return b.loadMySQLColumnInfo(table)
+	case strings.Contains(dialect, "sqlite"):
+		return b.loadSQLiteColumnInfo(table)
+	default:
+		cols, err := b.loadColumns(schema, table)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]columnInfo, len(cols))
+		for name := range cols {
+			out[strings.ToLower(name)] = columnInfo{Name: name}
+		}
+		return out, nil
+	}
+}
+
+func (b *sqlBase) loadPostgresColumnInfo(schema, table string) (map[string]columnInfo, error) {
+	rows, cancel, err := b.querySQL(10*time.Second, `
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = COALESCE(NULLIF($1, ''), current_schema()) AND table_name = $2
+ORDER BY ordinal_position`, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	defer rows.Close()
+	out := map[string]columnInfo{}
+	for rows.Next() {
+		var name, typ, nullable string
+		var def sql.NullString
+		if err := rows.Scan(&name, &typ, &nullable, &def); err != nil {
+			return nil, err
+		}
+		info := columnInfo{Name: name, Type: typ, Nullable: strings.EqualFold(nullable, "YES"), HasNullable: true}
+		if def.Valid {
+			info.Default = def.String
+			info.HasDefault = true
+		}
+		out[strings.ToLower(name)] = info
+	}
+	return out, rows.Err()
+}
+
+func (b *sqlBase) loadMySQLColumnInfo(table string) (map[string]columnInfo, error) {
+	rows, cancel, err := b.querySQL(10*time.Second, `
+SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = ?
+ORDER BY ORDINAL_POSITION`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	defer rows.Close()
+	out := map[string]columnInfo{}
+	for rows.Next() {
+		var name, typ, nullable string
+		var def sql.NullString
+		if err := rows.Scan(&name, &typ, &nullable, &def); err != nil {
+			return nil, err
+		}
+		info := columnInfo{Name: name, Type: typ, Nullable: strings.EqualFold(nullable, "YES"), HasNullable: true}
+		if def.Valid {
+			info.Default = def.String
+			info.HasDefault = true
+		}
+		out[strings.ToLower(name)] = info
+	}
+	return out, rows.Err()
+}
+
+func (b *sqlBase) loadSQLiteColumnInfo(table string) (map[string]columnInfo, error) {
+	rows, cancel, err := b.querySQL(10*time.Second, "PRAGMA table_info("+b.conn.Dialect().Quote(table)+")")
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	defer rows.Close()
+	out := map[string]columnInfo{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var def sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
+			return nil, err
+		}
+		info := columnInfo{Name: name, Type: typ, Nullable: notNull == 0 && pk == 0, HasNullable: true}
+		if def.Valid {
+			info.Default = def.String
+			info.HasDefault = true
+		}
+		out[strings.ToLower(name)] = info
+	}
+	return out, rows.Err()
+}
+
+func (b *sqlBase) planColumnDiffActions(schema, table, dbKey string, desired map[string]Var, current map[string]columnInfo, opts MigrateOptions) []MigrateAction {
+	if len(desired) == 0 || len(current) == 0 || b == nil || b.conn == nil {
+		return nil
+	}
+	dialect := b.conn.Dialect().Name()
+	names := make([]string, 0, len(desired))
+	byLower := make(map[string]string, len(desired))
+	for name := range desired {
+		low := strings.ToLower(strings.TrimSpace(name))
+		names = append(names, low)
+		byLower[low] = name
+	}
+	sort.Strings(names)
+	actions := make([]MigrateAction, 0)
+	for _, low := range names {
+		name := byLower[low]
+		field := desired[name]
+		info, ok := current[low]
+		if !ok {
+			continue
+		}
+		diffs := make([]columnDiff, 0, 3)
+		wantType := normalizeColumnType(dialect, migrateType(dialect, field.Type))
+		gotType := normalizeColumnType(dialect, info.Type)
+		if wantType != "" && gotType != "" && wantType != gotType {
+			diffs = append(diffs, columnDiff{
+				Field:  name,
+				Kind:   "type",
+				From:   info.Type,
+				To:     migrateType(dialect, field.Type),
+				SQL:    b.buildAlterColumnTypeSQL(schema, table, name, field),
+				Apply:  opts.Mode == "danger" && !opts.DryRun,
+				Risk:   "high",
+				Detail: "type " + info.Type + " -> " + migrateType(dialect, field.Type),
+			})
+		}
+		wantNullable := !(field.Required && !field.Nullable)
+		if strings.EqualFold(name, dbKey) {
+			wantNullable = false
+		}
+		if info.HasNullable && info.Nullable != wantNullable {
+			diffs = append(diffs, columnDiff{
+				Field:  name,
+				Kind:   "nullable",
+				From:   fmt.Sprintf("%t", info.Nullable),
+				To:     fmt.Sprintf("%t", wantNullable),
+				SQL:    b.buildAlterColumnNullableSQL(schema, table, name, field, wantNullable),
+				Apply:  !opts.DryRun,
+				Risk:   "medium",
+				Detail: fmt.Sprintf("nullable %t -> %t", info.Nullable, wantNullable),
+			})
+		}
+		wantDefault, wantDefaultLiteral, wantHasDefault := "", "", false
+		if field.Default != nil {
+			if lit, ok := migrateDefaultLiteral(field.Default); ok {
+				wantDefault, wantDefaultLiteral, wantHasDefault = normalizeColumnDefault(lit), lit, true
+			}
+		}
+		gotDefault := normalizeColumnDefault(info.Default)
+		gotHasDefault := info.HasDefault && gotDefault != "" && gotDefault != "null"
+		if gotHasDefault != wantHasDefault || (gotHasDefault && wantHasDefault && gotDefault != wantDefault) {
+			from, to := "<none>", "<none>"
+			if gotHasDefault {
+				from = info.Default
+			}
+			if wantHasDefault {
+				to = wantDefault
+			}
+			diffs = append(diffs, columnDiff{
+				Field:  name,
+				Kind:   "default",
+				From:   from,
+				To:     to,
+				SQL:    b.buildAlterColumnDefaultSQL(schema, table, name, wantDefaultLiteral, wantHasDefault),
+				Apply:  !opts.DryRun,
+				Risk:   "low",
+				Detail: "default " + from + " -> " + to,
+			})
+		}
+		if len(diffs) == 0 {
+			continue
+		}
+		for _, diff := range diffs {
+			detail := diff.Detail
+			apply := diff.Apply && strings.TrimSpace(diff.SQL) != ""
+			if diff.Kind == "type" && opts.Mode != "danger" {
+				detail += "; danger mode required to apply type changes"
+			}
+			if strings.TrimSpace(diff.SQL) == "" {
+				detail += "; direct alter is not supported by this dialect"
+			}
+			actions = append(actions, MigrateAction{
+				Kind:   "alter_column",
+				Target: table + "." + name,
+				SQL:    diff.SQL,
+				Apply:  apply,
+				Risk:   diff.Risk,
+				Detail: detail,
+				Diffs: []MigrateDelta{{
+					Field:  diff.Field,
+					Kind:   diff.Kind,
+					From:   diff.From,
+					To:     diff.To,
+					Apply:  apply,
+					Risk:   diff.Risk,
+					Detail: detail,
+				}},
+			})
+		}
+	}
+	return actions
+}
+
+func (b *sqlBase) buildAlterColumnTypeSQL(schema, table, name string, field Var) string {
+	if b == nil || b.conn == nil {
+		return ""
+	}
+	d := b.conn.Dialect()
+	dn := strings.ToLower(strings.TrimSpace(d.Name()))
+	target := b.sourceExpr(schema, table)
+	sqlType := migrateType(d.Name(), field.Type)
+	switch {
+	case strings.Contains(dn, "sqlite"):
+		return ""
+	case strings.Contains(dn, "mysql"):
+		return "ALTER TABLE " + target + " MODIFY COLUMN " + b.alterColumnDefinition(name, field, !(field.Required && !field.Nullable))
+	default:
+		return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " TYPE " + sqlType
+	}
+}
+
+func (b *sqlBase) buildAlterColumnNullableSQL(schema, table, name string, field Var, nullable bool) string {
+	if b == nil || b.conn == nil {
+		return ""
+	}
+	d := b.conn.Dialect()
+	dn := strings.ToLower(strings.TrimSpace(d.Name()))
+	target := b.sourceExpr(schema, table)
+	switch {
+	case strings.Contains(dn, "sqlite"):
+		return ""
+	case strings.Contains(dn, "mysql"):
+		return "ALTER TABLE " + target + " MODIFY COLUMN " + b.alterColumnDefinition(name, field, nullable)
+	default:
+		action := "SET NOT NULL"
+		if nullable {
+			action = "DROP NOT NULL"
+		}
+		return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " " + action
+	}
+}
+
+func (b *sqlBase) buildAlterColumnDefaultSQL(schema, table, name, defaultValue string, hasDefault bool) string {
+	if b == nil || b.conn == nil {
+		return ""
+	}
+	d := b.conn.Dialect()
+	dn := strings.ToLower(strings.TrimSpace(d.Name()))
+	target := b.sourceExpr(schema, table)
+	switch {
+	case strings.Contains(dn, "sqlite"):
+		return ""
+	case strings.Contains(dn, "mysql"):
+		if hasDefault {
+			return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " SET DEFAULT " + defaultValue
+		}
+		return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " DROP DEFAULT"
+	default:
+		if hasDefault {
+			return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " SET DEFAULT " + defaultValue
+		}
+		return "ALTER TABLE " + target + " ALTER COLUMN " + d.Quote(name) + " DROP DEFAULT"
+	}
+}
+
+func (b *sqlBase) alterColumnDefinition(name string, field Var, nullable bool) string {
+	d := b.conn.Dialect()
+	def := d.Quote(name) + " " + migrateType(d.Name(), field.Type)
+	if nullable {
+		def += " NULL"
+	} else {
+		def += " NOT NULL"
+	}
+	if field.Default != nil {
+		if lit, ok := migrateDefaultLiteral(field.Default); ok {
+			def += " DEFAULT " + lit
+		}
+	}
+	if strings.TrimSpace(field.Collation) != "" {
+		def += " COLLATE " + strings.TrimSpace(field.Collation)
+	}
+	if strings.Contains(strings.ToLower(d.Name()), "mysql") && strings.TrimSpace(field.Comment) != "" {
+		def += " COMMENT '" + strings.ReplaceAll(field.Comment, "'", "''") + "'"
+	}
+	return def
+}
+
+func normalizeColumnType(dialect, typ string) string {
+	s := strings.ToLower(strings.TrimSpace(typ))
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "`", "")
+	s = strings.ReplaceAll(s, `"`, "")
+	s = strings.Join(strings.Fields(s), " ")
+	if i := strings.IndexByte(s, '('); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	s = strings.TrimSuffix(s, " unsigned")
+	switch s {
+	case "int8", "bigint", "integer", "int", "mediumint", "smallint":
+		if strings.Contains(strings.ToLower(dialect), "sqlite") {
+			return "integer"
+		}
+		return "bigint"
+	case "bool":
+		return "boolean"
+	case "double", "double precision", "float8", "real", "numeric", "decimal":
+		return "double"
+	case "timestamp without time zone", "timestamp with time zone", "datetime":
+		return "timestamp"
+	case "character varying", "varchar", "char", "text", "longtext", "mediumtext":
+		return "text"
+	case "jsonb":
+		return "json"
+	}
+	return s
+}
+
+func normalizeColumnDefault(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	for strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") && len(s) > 1 {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	if i := strings.Index(s, "::"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	s = strings.Trim(s, "'\"`")
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
 func (b *sqlBase) migrateIndexes(schema, table string, indexes []Index, setting Map) error {
@@ -1911,7 +2379,7 @@ func (b *sqlBase) migrateIndexes(schema, table string, indexes []Index, setting 
 			sqlText += "IF NOT EXISTS "
 		}
 		sqlText += d.Quote(name) + " ON " + target + " (" + strings.Join(parts, ",") + ")"
-		if _, err := b.currentExec().ExecContext(context.Background(), sqlText); err != nil {
+		if _, err := b.execSQL(30*time.Second, sqlText); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(strings.ToLower(d.Name()), "mysql") && strings.Contains(msg, "duplicate key name") {
 				continue
@@ -2003,7 +2471,7 @@ func (b *sqlBase) ensureMigrateMetaTable() error {
 	if strings.Contains(strings.ToLower(b.conn.Dialect().Name()), "mysql") {
 		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migrations (`name` VARCHAR(191) PRIMARY KEY, `signature` VARCHAR(64) NOT NULL, `updated_at` TIMESTAMP NOT NULL)"
 	}
-	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
+	_, err := b.execSQL(30*time.Second, sqlText)
 	return err
 }
 
@@ -2011,7 +2479,7 @@ func (b *sqlBase) migrateAlreadyApplied(name, signature string) (bool, error) {
 	d := b.conn.Dialect()
 	query := "SELECT signature FROM _infrago_migrations WHERE " + d.Quote("name") + " = " + d.Placeholder(1)
 	var current string
-	err := b.currentExec().QueryRowContext(context.Background(), query, name).Scan(&current)
+	err := b.scanSQL(10*time.Second, query, []any{name}, &current)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -2025,18 +2493,18 @@ func (b *sqlBase) markMigrated(name, signature string) error {
 	d := strings.ToLower(b.conn.Dialect().Name())
 	now := time.Now()
 	if d == "pgsql" || d == "postgres" {
-		_, err := b.currentExec().ExecContext(context.Background(),
+		_, err := b.execSQL(30*time.Second,
 			"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES($1,$2,$3) ON CONFLICT(name) DO UPDATE SET signature=EXCLUDED.signature, updated_at=EXCLUDED.updated_at",
 			name, signature, now)
 		return err
 	}
 	if d == "sqlite" {
-		_, err := b.currentExec().ExecContext(context.Background(),
+		_, err := b.execSQL(30*time.Second,
 			"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET signature=excluded.signature, updated_at=excluded.updated_at",
 			name, signature, now)
 		return err
 	}
-	_, err := b.currentExec().ExecContext(context.Background(),
+	_, err := b.execSQL(30*time.Second,
 		"INSERT INTO _infrago_migrations(name,signature,updated_at) VALUES(?,?,?) ON DUPLICATE KEY UPDATE signature=VALUES(signature), updated_at=VALUES(updated_at)",
 		name, signature, now)
 	return err
@@ -2216,15 +2684,16 @@ func (b *sqlBase) ensureVersionMigrateTable() error {
 	if strings.Contains(strings.ToLower(b.conn.Dialect().Name()), "mysql") {
 		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migrations_v2 (`version` VARCHAR(191) PRIMARY KEY, `name` VARCHAR(255) NOT NULL, `checksum` VARCHAR(64) NOT NULL, `applied_at` TIMESTAMP NOT NULL)"
 	}
-	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
+	_, err := b.execSQL(30*time.Second, sqlText)
 	return err
 }
 
 func (b *sqlBase) loadVersionApplied() (map[string]string, error) {
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version, checksum FROM _infrago_migrations_v2")
+	rows, cancel, err := b.querySQL(10*time.Second, "SELECT version, checksum FROM _infrago_migrations_v2")
 	if err != nil {
 		return nil, err
 	}
+	defer cancel()
 	defer rows.Close()
 	out := map[string]string{}
 	for rows.Next() {
@@ -2238,10 +2707,11 @@ func (b *sqlBase) loadVersionApplied() (map[string]string, error) {
 }
 
 func (b *sqlBase) loadVersionAppliedOrderedDesc() ([]string, error) {
-	rows, err := b.currentExec().QueryContext(context.Background(), "SELECT version FROM _infrago_migrations_v2 ORDER BY applied_at DESC, version DESC")
+	rows, cancel, err := b.querySQL(10*time.Second, "SELECT version FROM _infrago_migrations_v2 ORDER BY applied_at DESC, version DESC")
 	if err != nil {
 		return nil, err
 	}
+	defer cancel()
 	defer rows.Close()
 	out := []string{}
 	for rows.Next() {
@@ -2259,27 +2729,27 @@ func (b *sqlBase) markVersionApplied(mg Migration) error {
 	d := strings.ToLower(b.conn.Dialect().Name())
 	c := mg.checksum()
 	if d == "pgsql" || d == "postgres" {
-		_, err := b.currentExec().ExecContext(context.Background(),
+		_, err := b.execSQL(30*time.Second,
 			"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES($1,$2,$3,$4) ON CONFLICT(version) DO UPDATE SET name=EXCLUDED.name, checksum=EXCLUDED.checksum, applied_at=EXCLUDED.applied_at",
 			mg.Version, mg.Name, c, now)
 		return err
 	}
 	if d == "sqlite" {
-		_, err := b.currentExec().ExecContext(context.Background(),
+		_, err := b.execSQL(30*time.Second,
 			"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, checksum=excluded.checksum, applied_at=excluded.applied_at",
 			mg.Version, mg.Name, c, now)
 		return err
 	}
-	_, err := b.currentExec().ExecContext(context.Background(),
+	_, err := b.execSQL(30*time.Second,
 		"INSERT INTO _infrago_migrations_v2(version,name,checksum,applied_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), checksum=VALUES(checksum), applied_at=VALUES(applied_at)",
 		mg.Version, mg.Name, c, now)
 	return err
 }
 
 func (b *sqlBase) unmarkVersionApplied(version string) error {
-	_, err := b.currentExec().ExecContext(context.Background(), "DELETE FROM _infrago_migrations_v2 WHERE version = ?", version)
+	_, err := b.execSQL(30*time.Second, "DELETE FROM _infrago_migrations_v2 WHERE version = ?", version)
 	if strings.ToLower(b.conn.Dialect().Name()) == "pgsql" || strings.ToLower(b.conn.Dialect().Name()) == "postgres" {
-		_, err = b.currentExec().ExecContext(context.Background(), "DELETE FROM _infrago_migrations_v2 WHERE version = $1", version)
+		_, err = b.execSQL(30*time.Second, "DELETE FROM _infrago_migrations_v2 WHERE version = $1", version)
 	}
 	return err
 }
@@ -2292,7 +2762,7 @@ func (b *sqlBase) ensureMigrationLogTable() error {
 	} else if strings.Contains(dn, "mysql") {
 		sqlText = "CREATE TABLE IF NOT EXISTS _infrago_migration_logs (`id` BIGINT AUTO_INCREMENT PRIMARY KEY, `kind` VARCHAR(64) NOT NULL, `version` VARCHAR(191), `name` VARCHAR(255), `success` TINYINT(1) NOT NULL, `cost_ms` BIGINT NOT NULL, `message` TEXT, `node` VARCHAR(255), `created_at` TIMESTAMP NOT NULL)"
 	}
-	_, err := b.currentExec().ExecContext(context.Background(), sqlText)
+	_, err := b.execSQL(30*time.Second, sqlText)
 	return err
 }
 
@@ -2417,11 +2887,11 @@ func (b *sqlBase) logMigrationEvent(kind, version, name string, success bool, co
 	dn := strings.ToLower(b.conn.Dialect().Name())
 	switch {
 	case dn == "pgsql" || dn == "postgres":
-		_, _ = b.currentExec().ExecContext(context.Background(),
+		_, _ = b.execSQL(10*time.Second,
 			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
 			kind, version, name, success, costMS, msg, node, now)
 	case strings.Contains(dn, "mysql"):
-		_, _ = b.currentExec().ExecContext(context.Background(),
+		_, _ = b.execSQL(10*time.Second,
 			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
 			kind, version, name, success, costMS, msg, node, now)
 	default:
@@ -2429,7 +2899,7 @@ func (b *sqlBase) logMigrationEvent(kind, version, name string, success bool, co
 		if success {
 			ok = 1
 		}
-		_, _ = b.currentExec().ExecContext(context.Background(),
+		_, _ = b.execSQL(10*time.Second,
 			"INSERT INTO _infrago_migration_logs(kind,version,name,success,cost_ms,message,node,created_at) VALUES(?,?,?,?,?,?,?,?)",
 			kind, version, name, ok, costMS, msg, node, now)
 	}

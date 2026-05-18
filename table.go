@@ -1,7 +1,6 @@
 package data
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -48,20 +47,22 @@ func (t *sqlTable) Insert(data Map) Map {
 	source := t.base.sourceExpr(t.schema, t.source)
 	sqlText := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", source, strings.Join(keys, ","), strings.Join(placeholders, ","))
 
+	ctx, cancel := t.base.opContext(10 * time.Second)
+	defer cancel()
 	if d.SupportsReturning() {
 		sqlText += " RETURNING " + d.Quote(t.base.storageField(t.key))
 		var id any
-		if err := t.base.currentExec().QueryRowContext(context.Background(), sqlText, toInterfaces(vals)...).Scan(&id); err != nil {
+		if err := t.base.currentExec().QueryRowContext(ctx, sqlText, toInterfaces(vals)...).Scan(&id); err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			t.base.setError(wrapErr(t.name+".insert.return", ErrInvalidUpdate, classifySQLError(err)))
+			t.base.setError(wrapErr(t.name+".insert.return", ErrInvalidUpdate, t.base.classifySQLError(err)))
 			return nil
 		}
 		val[t.key] = id
 	} else {
-		res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(vals)...)
+		res, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(vals)...)
 		if err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			t.base.setError(wrapErr(t.name+".insert.exec", ErrInvalidUpdate, classifySQLError(err)))
+			t.base.setError(wrapErr(t.name+".insert.exec", ErrInvalidUpdate, t.base.classifySQLError(err)))
 			return nil
 		}
 		if id, err := res.LastInsertId(); err == nil {
@@ -135,10 +136,87 @@ func (t *sqlTable) insertManyBatch(items []Map) ([]Map, bool, error) {
 	}
 	sort.Strings(cols)
 
+	return t.insertManyPrepared(normalized, cols)
+}
+
+func (t *sqlTable) insertManyPrepared(normalized []Map, cols []string) ([]Map, bool, error) {
+	if len(normalized) == 0 {
+		return []Map{}, true, nil
+	}
 	d := t.base.conn.Dialect()
-	valuesSQL := make([]string, 0, len(normalized))
-	args := make([]Any, 0, len(normalized)*len(cols))
-	for _, row := range normalized {
+	maxRows := maxInsertBatchRows(d, len(cols))
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if maxRows >= len(normalized) {
+		out, err := t.insertManyChunk(normalized, cols)
+		if err != nil {
+			if !d.SupportsReturning() {
+				// Keep old behavior for one-shot non-returning batch failures: fall back to per-row inserts.
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		statsFor(t.base.inst.Name).Writes.Add(int64(len(out)))
+		cacheTouchTable(t.base.inst.Name, t.source)
+		t.base.emitChange(MutationInsert, t.source, int64(len(out)), nil, nil, nil)
+		return out, true, nil
+	}
+
+	run := func() ([]Map, error) {
+		out := make([]Map, 0, len(normalized))
+		for start := 0; start < len(normalized); start += maxRows {
+			end := start + maxRows
+			if end > len(normalized) {
+				end = len(normalized)
+			}
+			chunk, err := t.insertManyChunk(normalized[start:end], cols)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, chunk...)
+		}
+		return out, nil
+	}
+
+	var out []Map
+	var err error
+	if t.base.tx == nil {
+		if err := t.base.beginTx(false); err != nil {
+			return nil, true, wrapErr(t.name+".insertMany.begin", ErrTxFailed, err)
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = t.base.Rollback()
+			}
+		}()
+		out, err = run()
+		if err != nil {
+			return nil, true, err
+		}
+		if err := t.base.Commit(); err != nil {
+			return nil, true, wrapErr(t.name+".insertMany.commit", ErrTxFailed, err)
+		}
+		committed = true
+	} else {
+		out, err = run()
+		if err != nil {
+			return nil, true, err
+		}
+	}
+
+	statsFor(t.base.inst.Name).Writes.Add(int64(len(out)))
+	cacheTouchTable(t.base.inst.Name, t.source)
+	t.base.emitChange(MutationInsert, t.source, int64(len(out)), nil, nil, nil)
+	return out, true, nil
+}
+
+func (t *sqlTable) insertManyChunk(chunk []Map, cols []string) ([]Map, error) {
+	d := t.base.conn.Dialect()
+	valuesSQL := make([]string, 0, len(chunk))
+	args := make([]Any, 0, len(chunk)*len(cols))
+	for _, row := range chunk {
 		ph := make([]string, 0, len(cols))
 		for _, col := range cols {
 			args = append(args, row[col])
@@ -152,41 +230,39 @@ func (t *sqlTable) insertManyBatch(items []Map) ([]Map, bool, error) {
 	}
 	sqlText := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", t.base.sourceExpr(t.schema, t.source), strings.Join(quotedCols, ","), strings.Join(valuesSQL, ","))
 
+	ctx, cancel := t.base.opContext(15 * time.Second)
+	defer cancel()
 	if d.SupportsReturning() {
 		sqlText += " RETURNING " + d.Quote(t.base.storageField(t.key))
-		rows, err := t.base.currentExec().QueryContext(context.Background(), sqlText, toInterfaces(args)...)
+		sqlRows, err := t.base.currentExec().QueryContext(ctx, sqlText, toInterfaces(args)...)
 		if err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			return nil, true, wrapErr(t.name+".insertMany.returning", ErrInvalidUpdate, classifySQLError(err))
+			return nil, wrapErr(t.name+".insertMany.returning", ErrInvalidUpdate, t.base.classifySQLError(err))
 		}
-		defer rows.Close()
+		defer sqlRows.Close()
 		i := 0
-		for rows.Next() {
+		for sqlRows.Next() {
 			var id any
-			if err := rows.Scan(&id); err != nil {
+			if err := sqlRows.Scan(&id); err != nil {
 				statsFor(t.base.inst.Name).Errors.Add(1)
-				return nil, true, wrapErr(t.name+".insertMany.scan", ErrInvalidUpdate, classifySQLError(err))
+				return nil, wrapErr(t.name+".insertMany.scan", ErrInvalidUpdate, t.base.classifySQLError(err))
 			}
-			if i < len(normalized) {
-				normalized[i][t.key] = id
+			if i < len(chunk) {
+				chunk[i][t.key] = id
 			}
 			i++
 		}
-		if err := rows.Err(); err != nil {
+		if err := sqlRows.Err(); err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			return nil, true, wrapErr(t.name+".insertMany.rows", ErrInvalidUpdate, classifySQLError(err))
+			return nil, wrapErr(t.name+".insertMany.rows", ErrInvalidUpdate, t.base.classifySQLError(err))
 		}
 	} else {
-		if _, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(args)...); err != nil {
+		if _, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(args)...); err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			// fallback to per-row in case dialect/driver has edge-case restrictions
-			return nil, false, nil
+			return nil, wrapErr(t.name+".insertMany.exec", ErrInvalidUpdate, t.base.classifySQLError(err))
 		}
 	}
-	statsFor(t.base.inst.Name).Writes.Add(int64(len(normalized)))
-	cacheTouchTable(t.base.inst.Name, t.source)
-	t.base.emitChange(MutationInsert, t.source, int64(len(normalized)), nil, nil, nil)
-	return normalized, true, nil
+	return chunk, nil
 }
 
 func (t *sqlTable) Upsert(data Map, args ...Any) Map {
@@ -292,9 +368,29 @@ func (t *sqlTable) updateEntity(item Map, data Map) Map {
 	vals = append(vals, item[t.key])
 
 	sqlText := fmt.Sprintf("UPDATE %s SET %s WHERE %s = %s", t.base.sourceExpr(t.schema, t.source), strings.Join(assigns, ","), d.Quote(t.key), d.Placeholder(len(vals)))
-	if _, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(vals)...); err != nil {
+	setMap, _, _, _, _, _ := t.parseUpdateData(payload, item, true)
+	if d.SupportsReturning() {
+		out, err := t.returningOne(sqlText+" RETURNING *", vals)
+		if err != nil {
+			statsFor(t.base.inst.Name).Errors.Add(1)
+			t.base.setError(wrapErr(t.name+".update.returning", ErrInvalidUpdate, t.base.classifySQLError(err)))
+			return nil
+		}
+		if out == nil {
+			t.base.setError(nil)
+			return nil
+		}
+		statsFor(t.base.inst.Name).Writes.Add(1)
+		cacheTouchTable(t.base.inst.Name, t.source)
+		t.base.emitChange(MutationUpdate, t.source, 1, item[t.key], setMap, Map{t.key: item[t.key]})
+		t.base.setError(nil)
+		return out
+	}
+	ctx, cancel := t.base.opContext(10 * time.Second)
+	defer cancel()
+	if _, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(vals)...); err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".change.exec", ErrInvalidUpdate, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".change.exec", ErrInvalidUpdate, t.base.classifySQLError(err)))
 		return nil
 	}
 	statsFor(t.base.inst.Name).Writes.Add(1)
@@ -304,7 +400,6 @@ func (t *sqlTable) updateEntity(item Map, data Map) Map {
 	for k, v := range item {
 		out[k] = v
 	}
-	setMap, _, _, _, _, _ := t.parseUpdateData(payload, item, true)
 	for k, v := range setMap {
 		out[k] = v
 	}
@@ -324,6 +419,58 @@ func (t *sqlTable) reloadEntityByKey(id Any, fallback Map) Map {
 		return fallback
 	}
 	return entity
+}
+
+func (t *sqlTable) returningOne(sqlText string, vals []Any) (Map, error) {
+	ctx, cancel := t.base.opContext(10 * time.Second)
+	defer cancel()
+	rows, err := t.base.currentExec().QueryContext(ctx, sqlText, toInterfaces(vals)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items, err := scanMaps(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	raw := items[0]
+	out, err := t.decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := out[t.key]; !ok {
+		if v, yes := raw[t.base.storageField(t.key)]; yes {
+			out[t.key] = v
+		}
+	}
+	return out, nil
+}
+
+func (t *sqlTable) returningKeys(sqlText string, vals []Any) ([]Any, error) {
+	ctx, cancel := t.base.opContext(15 * time.Second)
+	defer cancel()
+	rows, err := t.base.currentExec().QueryContext(ctx, sqlText, toInterfaces(vals)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := make([]Any, 0)
+	for rows.Next() {
+		var id Any
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id != nil {
+			keys = append(keys, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 func (t *sqlTable) updateOneWithQuery(sets Map, q Query) Map {
@@ -352,11 +499,6 @@ func (t *sqlTable) updateManyWithQuery(sets Map, q Query, whereMap Map) int64 {
 	payload := t.withAutoUpdateStamp(sets)
 	if t.blockUnsafeMutation(q) {
 		t.base.setError(wrapErr(t.name+".update.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe update blocked, set %s=true to allow full-table update", OptUnsafe)))
-		return 0
-	}
-	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
-	if keyErr != nil {
-		t.base.setError(wrapErr(t.name+".update.keys", ErrInvalidQuery, keyErr))
 		return 0
 	}
 	if t.hasCollectionUpdate(payload) {
@@ -388,10 +530,37 @@ func (t *sqlTable) updateManyWithQuery(sets Map, q Query, whereMap Map) int64 {
 	}
 
 	sqlText := fmt.Sprintf("UPDATE %s SET %s WHERE %s", t.base.sourceExpr(t.schema, t.source), strings.Join(assign, ","), whereSQL)
-	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(vals)...)
+	if t.base.watcherKeysEnabled() && d.SupportsReturning() {
+		keys, err := t.returningKeys(sqlText+" RETURNING "+d.Quote(t.base.storageField(t.key)), vals)
+		if err != nil {
+			statsFor(t.base.inst.Name).Errors.Add(1)
+			t.base.setError(wrapErr(t.name+".update.returningKeys", ErrInvalidQuery, t.base.classifySQLError(err)))
+			return 0
+		}
+		affected := int64(len(keys))
+		if affected > 0 {
+			statsFor(t.base.inst.Name).Writes.Add(1)
+			cacheTouchTable(t.base.inst.Name, t.source)
+		}
+		var key Any
+		if len(keys) > 0 {
+			key = keys[0]
+		}
+		t.base.emitChangeWithKeys(MutationUpdate, t.source, affected, key, keys, payload, whereMap)
+		t.base.setError(nil)
+		return affected
+	}
+	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
+	if keyErr != nil {
+		t.base.setError(wrapErr(t.name+".update.keys", ErrInvalidQuery, keyErr))
+		return 0
+	}
+	ctx, cancel := t.base.opContext(15 * time.Second)
+	defer cancel()
+	res, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(vals)...)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".update.exec", ErrInvalidUpdate, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".update.exec", ErrInvalidUpdate, t.base.classifySQLError(err)))
 		return 0
 	}
 	statsFor(t.base.inst.Name).Writes.Add(1)
@@ -399,7 +568,7 @@ func (t *sqlTable) updateManyWithQuery(sets Map, q Query, whereMap Map) int64 {
 	affected, err := res.RowsAffected()
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".update.rows", ErrInvalidQuery, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".update.rows", ErrInvalidQuery, t.base.classifySQLError(err)))
 		return 0
 	}
 	var key Any
@@ -701,16 +870,33 @@ func (t *sqlTable) Delete(args ...Any) Map {
 	}
 	d := t.base.conn.Dialect()
 	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", t.base.sourceExpr(t.schema, t.source), d.Quote(t.base.storageField(t.key)), d.Placeholder(1))
-	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, id)
+	if d.SupportsReturning() {
+		out, err := t.returningOne(sqlText+" RETURNING *", []Any{id})
+		if err != nil {
+			statsFor(t.base.inst.Name).Errors.Add(1)
+			t.base.setError(wrapErr(t.name+".delete.returning", ErrInvalidQuery, t.base.classifySQLError(err)))
+			return nil
+		}
+		if out != nil {
+			statsFor(t.base.inst.Name).Writes.Add(1)
+			cacheTouchTable(t.base.inst.Name, t.source)
+			t.base.emitChange(MutationDelete, t.source, 1, id, nil, Map{t.key: id})
+		}
+		t.base.setError(nil)
+		return out
+	}
+	ctx, cancel := t.base.opContext(10 * time.Second)
+	defer cancel()
+	res, err := t.base.currentExec().ExecContext(ctx, sqlText, id)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, t.base.classifySQLError(err)))
 		return nil
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, t.base.classifySQLError(err)))
 		return nil
 	}
 	if affected > 0 {
@@ -741,11 +927,6 @@ func (t *sqlTable) DeleteMany(args ...Any) int64 {
 		t.base.setError(wrapErr(t.name+".delete.unsafe", ErrInvalidQuery, fmt.Errorf("unsafe delete blocked, set %s=true to allow full-table delete", OptUnsafe)))
 		return 0
 	}
-	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
-	if keyErr != nil {
-		t.base.setError(wrapErr(t.name+".delete.keys", ErrInvalidQuery, keyErr))
-		return 0
-	}
 	whereMap := t.queryArgsMap(args...)
 	b := NewSQLBuilder(t.base.conn.Dialect())
 	t.bindBuilder(b, q)
@@ -755,10 +936,38 @@ func (t *sqlTable) DeleteMany(args ...Any) int64 {
 		return 0
 	}
 	sqlText := fmt.Sprintf("DELETE FROM %s WHERE %s", t.base.sourceExpr(t.schema, t.source), whereSQL)
-	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(params)...)
+	if t.base.watcherKeysEnabled() && t.base.conn.Dialect().SupportsReturning() {
+		d := t.base.conn.Dialect()
+		keys, err := t.returningKeys(sqlText+" RETURNING "+d.Quote(t.base.storageField(t.key)), params)
+		if err != nil {
+			statsFor(t.base.inst.Name).Errors.Add(1)
+			t.base.setError(wrapErr(t.name+".delete.returningKeys", ErrInvalidQuery, t.base.classifySQLError(err)))
+			return 0
+		}
+		affected := int64(len(keys))
+		if affected > 0 {
+			statsFor(t.base.inst.Name).Writes.Add(1)
+			cacheTouchTable(t.base.inst.Name, t.source)
+		}
+		var key Any
+		if len(keys) > 0 {
+			key = keys[0]
+		}
+		t.base.emitChangeWithKeys(MutationDelete, t.source, affected, key, keys, nil, whereMap)
+		t.base.setError(nil)
+		return affected
+	}
+	keys, keyErr := t.mutationKeysForQuery(q, t.base.watcherKeysEnabled())
+	if keyErr != nil {
+		t.base.setError(wrapErr(t.name+".delete.keys", ErrInvalidQuery, keyErr))
+		return 0
+	}
+	ctx, cancel := t.base.opContext(15 * time.Second)
+	defer cancel()
+	res, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(params)...)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".delete.exec", ErrInvalidQuery, t.base.classifySQLError(err)))
 		return 0
 	}
 	statsFor(t.base.inst.Name).Writes.Add(1)
@@ -766,7 +975,7 @@ func (t *sqlTable) DeleteMany(args ...Any) int64 {
 	affected, err := res.RowsAffected()
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, classifySQLError(err)))
+		t.base.setError(wrapErr(t.name+".delete.rows", ErrInvalidQuery, t.base.classifySQLError(err)))
 		return 0
 	}
 	var key Any
@@ -903,28 +1112,93 @@ func (t *sqlTable) mutationKeysForQuery(q Query, enabled bool) ([]Any, error) {
 		return nil, nil
 	}
 	qq := q
-	qq.Select = []string{t.key}
+	storageKey := strings.TrimSpace(t.base.storageField(t.key))
+	if storageKey == "" {
+		return nil, nil
+	}
+	qq.Select = []string{storageKey}
 	qq.Offset = 0
 	if len(qq.Sort) == 0 {
-		key := strings.TrimSpace(t.base.storageField(t.key))
-		if key != "" {
-			qq.Sort = []Sort{{Field: key}}
+		qq.Sort = []Sort{{Field: storageKey}}
+	}
+	maxKeys := t.base.watcherKeysMaxKeys()
+	if maxKeys > 0 && (qq.Limit <= 0 || qq.Limit > maxKeys) {
+		qq.Limit = maxKeys
+	}
+	batch := t.base.watcherKeysBatchSize()
+	if batch <= 0 {
+		return t.queryMutationKeysChunk(qq, storageKey)
+	}
+	offset := qq.Offset
+	remain := qq.Limit
+	keys := make([]Any, 0)
+	for {
+		chunk := batch
+		if remain > 0 && chunk > remain {
+			chunk = remain
+		}
+		partQuery := qq
+		partQuery.Offset = offset
+		partQuery.Limit = chunk
+		part, err := t.queryMutationKeysChunk(partQuery, storageKey)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, part...)
+		if len(part) == 0 || int64(len(part)) < chunk {
+			break
+		}
+		offset += int64(len(part))
+		if remain > 0 {
+			remain -= int64(len(part))
+			if remain <= 0 {
+				break
+			}
 		}
 	}
-	qq.Limit = 0
-	items, err := t.queryWithQuery(qq)
+	return keys, nil
+}
+
+func (t *sqlTable) queryMutationKeysChunk(q Query, storageKey string) ([]Any, error) {
+	plan, err := t.buildSQLPlan("watcher_keys", q)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]Any, 0, len(items))
-	for _, item := range items {
-		if item == nil {
+	start := time.Now()
+	ctx, cancel := t.base.opContext(15 * time.Second)
+	defer cancel()
+	rows, err := t.base.currentExec().QueryContext(ctx, plan.SQL, toInterfaces(plan.Params)...)
+	if err != nil {
+		statsFor(t.base.inst.Name).Errors.Add(1)
+		return nil, t.base.classifySQLError(err)
+	}
+	defer rows.Close()
+	t.base.logSlow(plan.SQL, plan.Params, start)
+	keys := make([]Any, 0)
+	for rows.Next() {
+		var raw Any
+		if err := rows.Scan(&raw); err != nil {
+			statsFor(t.base.inst.Name).Errors.Add(1)
+			return nil, t.base.classifySQLError(err)
+		}
+		switch vv := raw.(type) {
+		case []byte:
+			raw = string(vv)
+		}
+		item := t.base.appMap(Map{storageKey: raw})
+		if id, ok := item[t.key]; ok && id != nil {
+			keys = append(keys, id)
 			continue
 		}
-		if id, ok := item[t.key]; ok && id != nil {
+		if id, ok := item[storageKey]; ok && id != nil {
 			keys = append(keys, id)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		statsFor(t.base.inst.Name).Errors.Add(1)
+		return nil, t.base.classifySQLError(err)
+	}
+	statsFor(t.base.inst.Name).Queries.Add(1)
 	return keys, nil
 }
 
@@ -1279,6 +1553,10 @@ func (t *sqlTable) normalizeWriteValue(field string, value Any) Any {
 	}
 	dialect := strings.ToLower(t.base.conn.Dialect().Name())
 
+	if out, ok := bindStructuredValue(t.base.conn.Dialect(), cfg, value); ok {
+		return out
+	}
+
 	if typeName == "json" || typeName == "jsonb" || strings.HasPrefix(typeName, "map") {
 		if b, err := json.Marshal(value); err == nil {
 			return string(b)
@@ -1287,7 +1565,7 @@ func (t *sqlTable) normalizeWriteValue(field string, value Any) Any {
 
 	if isArrayWriteField(cfg, hasField) {
 		if dialect == "pgsql" || dialect == "postgres" {
-			return pgArrayLiteral(value)
+			return bindArrayValue(t.base.conn.Dialect(), value)
 		}
 		if b, err := json.Marshal(value); err == nil {
 			return string(b)
@@ -1309,21 +1587,32 @@ func isArrayWriteField(cfg Var, hasField bool) bool {
 	if !hasField {
 		return false
 	}
-	kind := strings.ToLower(strings.TrimSpace(cfg.Type))
-	if strings.HasPrefix(kind, "array") || strings.HasPrefix(kind, "[") {
-		return true
+	return isArrayVar(cfg)
+}
+
+func maxInsertBatchRows(d Dialect, cols int) int {
+	if cols <= 0 {
+		return 1
 	}
-	if cfg.Setting == nil {
-		return false
+	limit := 0
+	if limiter, ok := d.(ParameterLimiter); ok {
+		limit = limiter.MaxParams()
 	}
-	for _, key := range []string{"array", "multiple"} {
-		if raw, ok := cfg.Setting[key]; ok {
-			if on, yes := parseBool(raw); yes && on {
-				return true
-			}
+	if limit <= 0 {
+		switch strings.ToLower(strings.TrimSpace(d.Name())) {
+		case "pgsql", "postgres", "mysql":
+			limit = 65535
+		case "sqlite":
+			limit = 999
+		default:
+			return 1 << 30
 		}
 	}
-	return false
+	rows := limit / cols
+	if rows < 1 {
+		return 1
+	}
+	return rows
 }
 
 func collectionAppend(current Any, appendVal Any, unique bool) Any {
@@ -1492,19 +1781,23 @@ func (t *sqlTable) upsertNative(data Map, condition Map) (Map, error) {
 	}
 	if d.SupportsReturning() {
 		var id any
-		if err := t.base.currentExec().QueryRowContext(context.Background(), sqlText, toInterfaces(insertVals)...).Scan(&id); err != nil {
+		ctx, cancel := t.base.opContext(10 * time.Second)
+		defer cancel()
+		if err := t.base.currentExec().QueryRowContext(ctx, sqlText, toInterfaces(insertVals)...).Scan(&id); err != nil {
 			statsFor(t.base.inst.Name).Errors.Add(1)
-			return nil, wrapErr(t.name+".upsert.native.return", ErrInvalidUpdate, classifySQLError(err))
+			return nil, wrapErr(t.name+".upsert.native.return", ErrInvalidUpdate, t.base.classifySQLError(err))
 		}
 		out[t.key] = id
 		statsFor(t.base.inst.Name).Writes.Add(1)
 		cacheTouchTable(t.base.inst.Name, t.source)
 		return out, nil
 	}
-	res, err := t.base.currentExec().ExecContext(context.Background(), sqlText, toInterfaces(insertVals)...)
+	ctx, cancel := t.base.opContext(10 * time.Second)
+	defer cancel()
+	res, err := t.base.currentExec().ExecContext(ctx, sqlText, toInterfaces(insertVals)...)
 	if err != nil {
 		statsFor(t.base.inst.Name).Errors.Add(1)
-		return nil, wrapErr(t.name+".upsert.native.exec", ErrInvalidUpdate, classifySQLError(err))
+		return nil, wrapErr(t.name+".upsert.native.exec", ErrInvalidUpdate, t.base.classifySQLError(err))
 	}
 	if id, err := res.LastInsertId(); err == nil && id > 0 {
 		out[t.key] = id

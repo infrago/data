@@ -1,6 +1,10 @@
 package data
 
-import "database/sql"
+import (
+	"database/sql"
+
+	. "github.com/infrago/base"
+)
 
 type (
 	Driver interface {
@@ -59,5 +63,25 @@ type (
 		Placeholder(int) string
 		SupportsILike() bool
 		SupportsReturning() bool
+	}
+
+	ValueBinder interface {
+		BindValue(Var, any) (any, bool)
+	}
+
+	ValueDecoder interface {
+		DecodeValue(Var, any) (any, bool)
+	}
+
+	ArrayBinder interface {
+		BindArray(any) any
+	}
+
+	ParameterLimiter interface {
+		MaxParams() int
+	}
+
+	ErrorClassifier interface {
+		ClassifyError(error) error
 	}
 )

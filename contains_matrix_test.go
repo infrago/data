@@ -10,6 +10,12 @@ func TestPgArrayContainsAndElemMatchMatrix(t *testing.T) {
 	b := NewSQLBuilder(testDialect{name: "pgsql"})
 	b.isArrayField = func(field string) bool { return field == "tags" }
 	b.isJSONField = func(field string) bool { return field == "metadata" }
+	b.bindField = func(field string, value Any) Any {
+		if field == "tags" {
+			return bindArrayValue(testDialect{name: "pgsql"}, value)
+		}
+		return value
+	}
 
 	sqlText, err := b.CompileExpr(CmpExpr{Field: "tags", Op: OpContains, Value: []string{}})
 	if err != nil {
@@ -24,6 +30,12 @@ func TestPgArrayContainsAndElemMatchMatrix(t *testing.T) {
 
 	b = NewSQLBuilder(testDialect{name: "pgsql"})
 	b.isArrayField = func(field string) bool { return field == "tags" }
+	b.bindField = func(field string, value Any) Any {
+		if field == "tags" {
+			return bindArrayValue(testDialect{name: "pgsql"}, value)
+		}
+		return value
+	}
 	sqlText, err = b.CompileExpr(CmpExpr{Field: "tags", Op: OpElemMatch, Value: "go"})
 	if err != nil {
 		t.Fatalf("elemMatch compile failed: %v", err)

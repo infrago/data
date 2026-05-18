@@ -14,22 +14,25 @@ import (
 )
 
 type moduleStats struct {
-	Queries    atomic.Int64
-	Writes     atomic.Int64
-	Errors     atomic.Int64
-	Slow       atomic.Int64
-	CacheHit   atomic.Int64
-	SlowMs     atomic.Int64
-	B1         atomic.Int64
-	B2         atomic.Int64
-	B3         atomic.Int64
-	B4         atomic.Int64
-	B5         atomic.Int64
-	B6         atomic.Int64
-	B7         atomic.Int64
-	ChangeIn   atomic.Int64
-	ChangeDrop atomic.Int64
-	ChangeFail atomic.Int64
+	Queries     atomic.Int64
+	Writes      atomic.Int64
+	Errors      atomic.Int64
+	Slow        atomic.Int64
+	CacheHit    atomic.Int64
+	CacheMiss   atomic.Int64
+	CacheFlight atomic.Int64
+	CacheWait   atomic.Int64
+	SlowMs      atomic.Int64
+	B1          atomic.Int64
+	B2          atomic.Int64
+	B3          atomic.Int64
+	B4          atomic.Int64
+	B5          atomic.Int64
+	B6          atomic.Int64
+	B7          atomic.Int64
+	ChangeIn    atomic.Int64
+	ChangeDrop  atomic.Int64
+	ChangeFail  atomic.Int64
 }
 
 type cacheValue struct {
@@ -38,19 +41,28 @@ type cacheValue struct {
 	total    int64
 }
 
+type cacheFlightCall struct {
+	wg  sync.WaitGroup
+	val cacheValue
+	err error
+}
+
 type Stats struct {
-	Queries    int64   `json:"queries"`
-	Writes     int64   `json:"writes"`
-	Errors     int64   `json:"errors"`
-	Slow       int64   `json:"slow"`
-	CacheHit   int64   `json:"cacheHit"`
-	CacheRate  float64 `json:"cacheRate"`
-	SlowAvgMs  int64   `json:"slowAvgMs"`
-	SlowP50Ms  int64   `json:"slowP50Ms"`
-	SlowP95Ms  int64   `json:"slowP95Ms"`
-	ChangeIn   int64   `json:"changeIn"`
-	ChangeDrop int64   `json:"changeDrop"`
-	ChangeFail int64   `json:"changeFail"`
+	Queries     int64   `json:"queries"`
+	Writes      int64   `json:"writes"`
+	Errors      int64   `json:"errors"`
+	Slow        int64   `json:"slow"`
+	CacheHit    int64   `json:"cacheHit"`
+	CacheMiss   int64   `json:"cacheMiss"`
+	CacheFlight int64   `json:"cacheFlight"`
+	CacheWait   int64   `json:"cacheWait"`
+	CacheRate   float64 `json:"cacheRate"`
+	SlowAvgMs   int64   `json:"slowAvgMs"`
+	SlowP50Ms   int64   `json:"slowP50Ms"`
+	SlowP95Ms   int64   `json:"slowP95Ms"`
+	ChangeIn    int64   `json:"changeIn"`
+	ChangeDrop  int64   `json:"changeDrop"`
+	ChangeFail  int64   `json:"changeFail"`
 }
 
 var (
@@ -61,6 +73,7 @@ var (
 	cacheDepend   sync.Map
 	cacheKeyDeps  sync.Map
 	cacheCount    sync.Map
+	cacheFlights  sync.Map
 	cacheSyncOnce sync.Once
 )
 
@@ -89,18 +102,21 @@ func (m *Module) Stats(names ...string) Stats {
 	slow := s.Slow.Load()
 	slowMs := s.SlowMs.Load()
 	return Stats{
-		Queries:    queries,
-		Writes:     s.Writes.Load(),
-		Errors:     s.Errors.Load(),
-		Slow:       slow,
-		CacheHit:   cacheHit,
-		CacheRate:  ratio(cacheHit, queries),
-		SlowAvgMs:  avg(slowMs, slow),
-		SlowP50Ms:  slowPercentile(s, 0.50),
-		SlowP95Ms:  slowPercentile(s, 0.95),
-		ChangeIn:   s.ChangeIn.Load(),
-		ChangeDrop: s.ChangeDrop.Load(),
-		ChangeFail: s.ChangeFail.Load(),
+		Queries:     queries,
+		Writes:      s.Writes.Load(),
+		Errors:      s.Errors.Load(),
+		Slow:        slow,
+		CacheHit:    cacheHit,
+		CacheMiss:   s.CacheMiss.Load(),
+		CacheFlight: s.CacheFlight.Load(),
+		CacheWait:   s.CacheWait.Load(),
+		CacheRate:   ratio(cacheHit, queries),
+		SlowAvgMs:   avg(slowMs, slow),
+		SlowP50Ms:   slowPercentile(s, 0.50),
+		SlowP95Ms:   slowPercentile(s, 0.95),
+		ChangeIn:    s.ChangeIn.Load(),
+		ChangeDrop:  s.ChangeDrop.Load(),
+		ChangeFail:  s.ChangeFail.Load(),
 	}
 }
 
@@ -396,6 +412,40 @@ func cacheStoreWithCap(name, key string, val cacheValue, capacity int, tables []
 	}
 }
 
+func cacheFlightGroup(name string) *sync.Map {
+	if name == "" {
+		name = "default"
+	}
+	if v, ok := cacheFlights.Load(name); ok {
+		return v.(*sync.Map)
+	}
+	m := &sync.Map{}
+	actual, _ := cacheFlights.LoadOrStore(name, m)
+	return actual.(*sync.Map)
+}
+
+func cacheSingleflight(name, key string, run func() (cacheValue, error)) (cacheValue, bool, error) {
+	if strings.TrimSpace(key) == "" {
+		val, err := run()
+		return val, false, err
+	}
+	group := cacheFlightGroup(name)
+	call := &cacheFlightCall{}
+	call.wg.Add(1)
+	actual, loaded := group.LoadOrStore(key, call)
+	if loaded {
+		statsFor(name).CacheWait.Add(1)
+		existing := actual.(*cacheFlightCall)
+		existing.wg.Wait()
+		return existing.val, true, existing.err
+	}
+	defer group.Delete(key)
+	defer call.wg.Done()
+	statsFor(name).CacheFlight.Add(1)
+	call.val, call.err = run()
+	return call.val, false, call.err
+}
+
 func cacheEvict(name string, capacity int) {
 	for cacheCountPtr(name).Load() > int64(capacity) {
 		removed := false
@@ -582,4 +632,93 @@ func (b *sqlBase) cacheCapacity() int {
 		}
 	}
 	return 0
+}
+
+func (b *sqlBase) planCacheCapacity() int {
+	const def = 2048
+	if b == nil || b.inst == nil || b.inst.Config.Setting == nil {
+		return def
+	}
+	if raw, ok := b.inst.Config.Setting["plan"]; ok {
+		return parsePlanCapacity(raw, def)
+	}
+	if raw, ok := b.inst.Config.Setting["planCache"]; ok {
+		return parsePlanCapacity(raw, def)
+	}
+	if raw, ok := b.inst.Config.Setting["sqlPlan"]; ok {
+		return parsePlanCapacity(raw, def)
+	}
+	if raw, ok := b.inst.Config.Setting["cache"]; ok {
+		if vv, ok := raw.(Map); ok {
+			for _, key := range []string{"plan", "planCache", "planCapacity", "sqlPlan", "sqlPlanCapacity"} {
+				if c, ok := vv[key]; ok {
+					return parsePlanCapacity(c, def)
+				}
+			}
+		}
+	}
+	return def
+}
+
+func parsePlanCapacity(raw Any, def int) int {
+	switch vv := raw.(type) {
+	case bool:
+		if !vv {
+			return 0
+		}
+		return def
+	case int:
+		if vv < 0 {
+			return 0
+		}
+		if vv > 0 {
+			return vv
+		}
+	case int64:
+		if vv < 0 {
+			return 0
+		}
+		if vv > 0 {
+			return int(vv)
+		}
+	case string:
+		s := strings.TrimSpace(vv)
+		if s == "" {
+			return def
+		}
+		if on, err := strconv.ParseBool(s); err == nil {
+			if !on {
+				return 0
+			}
+			return def
+		}
+		if n, err := strconv.Atoi(s); err == nil {
+			if n < 0 {
+				return 0
+			}
+			if n > 0 {
+				return n
+			}
+		}
+	case Map:
+		if e, ok := vv["enable"]; ok {
+			on, yes := parseBool(e)
+			if yes && !on {
+				return 0
+			}
+		}
+		for _, key := range []string{"capacity", "cap", "max"} {
+			if c, ok := vv[key]; ok {
+				if n, yes := parseIntAny(c); yes {
+					if n < 0 {
+						return 0
+					}
+					if n > 0 {
+						return n
+					}
+				}
+			}
+		}
+	}
+	return def
 }

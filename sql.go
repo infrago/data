@@ -18,6 +18,7 @@ type SQLBuilder struct {
 	isJSONField  func(string) bool
 	isArrayField func(string) bool
 	toStorage    func(string) string
+	bindField    func(string, Any) Any
 }
 
 func NewSQLBuilder(d Dialect) *SQLBuilder {
@@ -39,6 +40,13 @@ func (b *SQLBuilder) bind(v Any) string {
 	b.index++
 	b.args = append(b.args, v)
 	return ph
+}
+
+func (b *SQLBuilder) bindValue(field string, v Any) string {
+	if b.bindField != nil {
+		v = b.bindField(field, v)
+	}
+	return b.bind(v)
 }
 
 func (b *SQLBuilder) CompileExpr(e Expr) (string, error) {
@@ -135,20 +143,20 @@ func (b *SQLBuilder) compileCmp(c CmpExpr) (string, error) {
 		if c.Value == nil {
 			return field + " IS NULL", nil
 		}
-		return field + " = " + b.bind(c.Value), nil
+		return field + " = " + b.bindValue(c.Field, c.Value), nil
 	case OpNe:
 		if c.Value == nil {
 			return field + " IS NOT NULL", nil
 		}
-		return field + " <> " + b.bind(c.Value), nil
+		return field + " <> " + b.bindValue(c.Field, c.Value), nil
 	case OpGt:
-		return field + " > " + b.bind(c.Value), nil
+		return field + " > " + b.bindValue(c.Field, c.Value), nil
 	case OpGte:
-		return field + " >= " + b.bind(c.Value), nil
+		return field + " >= " + b.bindValue(c.Field, c.Value), nil
 	case OpLt:
-		return field + " < " + b.bind(c.Value), nil
+		return field + " < " + b.bindValue(c.Field, c.Value), nil
 	case OpLte:
-		return field + " <= " + b.bind(c.Value), nil
+		return field + " <= " + b.bindValue(c.Field, c.Value), nil
 	case OpIn:
 		vals := flattenSlice(c.Value)
 		if len(vals) == 0 {
@@ -192,7 +200,7 @@ func (b *SQLBuilder) compileCmp(c CmpExpr) (string, error) {
 	case OpContains:
 		return b.compileContains(c.Field, field, c.Value)
 	case OpOverlap:
-		return b.compileOverlap(field, c.Value)
+		return b.compileOverlap(c.Field, field, c.Value)
 	case OpElemMatch:
 		return b.compileElemMatch(c.Field, field, c.Value)
 	default:
@@ -249,7 +257,7 @@ func (b *SQLBuilder) compileContains(logicalField, field string, value Any) (str
 	switch name {
 	case "pgsql", "postgres":
 		if b.isArrayField != nil && b.isArrayField(logicalField) {
-			return field + " @> " + b.bind(pgArrayLiteral(value)), nil
+			return field + " @> " + b.bindValue(logicalField, value), nil
 		}
 		raw, err := jsonString(value)
 		if err != nil {
@@ -273,12 +281,12 @@ func (b *SQLBuilder) compileContains(logicalField, field string, value Any) (str
 	}
 }
 
-func (b *SQLBuilder) compileOverlap(field string, value Any) (string, error) {
+func (b *SQLBuilder) compileOverlap(logicalField, field string, value Any) (string, error) {
 	name := strings.ToLower(b.dialect.Name())
 	switch name {
 	case "pgsql", "postgres":
 		// overlap for arrays
-		return field + " && " + b.bind(pgArrayLiteral(value)), nil
+		return field + " && " + b.bindValue(logicalField, value), nil
 	case "mysql":
 		raw, err := jsonString(value)
 		if err != nil {
@@ -297,7 +305,7 @@ func (b *SQLBuilder) compileElemMatch(logicalField, field string, value Any) (st
 	switch name {
 	case "pgsql", "postgres":
 		if b.isArrayField != nil && b.isArrayField(logicalField) {
-			return field + " @> " + b.bind(pgArrayLiteral(value)), nil
+			return field + " @> " + b.bindValue(logicalField, value), nil
 		}
 		arr := []Any{value}
 		raw, err := jsonString(arr)
@@ -430,7 +438,135 @@ func pgArrayLiteral(v Any) string {
 	}
 	items := make([]string, 0, len(vals))
 	for _, item := range vals {
-		items = append(items, fmt.Sprintf("%v", item))
+		items = append(items, pgArrayElementLiteral(item))
 	}
 	return "{" + strings.Join(items, ",") + "}"
+}
+
+func bindArrayValue(d Dialect, v Any) any {
+	if binder, ok := d.(ArrayBinder); ok {
+		return binder.BindArray(v)
+	}
+	return pgArrayLiteral(v)
+}
+
+func pgArrayElementLiteral(v Any) string {
+	if v == nil {
+		return "NULL"
+	}
+	text := fmt.Sprintf("%v", v)
+	if text == "" {
+		return `""`
+	}
+	needsQuote := strings.EqualFold(text, "NULL")
+	for _, r := range text {
+		switch r {
+		case '"', '\\', ',', '{', '}', ' ', '\t', '\n', '\r':
+			needsQuote = true
+		}
+	}
+	if !needsQuote {
+		return text
+	}
+	var out strings.Builder
+	out.WriteByte('"')
+	for _, r := range text {
+		if r == '"' || r == '\\' {
+			out.WriteByte('\\')
+		}
+		out.WriteRune(r)
+	}
+	out.WriteByte('"')
+	return out.String()
+}
+
+func parsePGArrayLiteral(raw string) ([]Any, bool) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' {
+		return nil, false
+	}
+	pos := 0
+	items, ok := parsePGArrayItems(raw, &pos)
+	if !ok || pos != len(raw) {
+		return nil, false
+	}
+	return items, true
+}
+
+func parsePGArrayItems(raw string, pos *int) ([]Any, bool) {
+	if *pos >= len(raw) || raw[*pos] != '{' {
+		return nil, false
+	}
+	*pos = *pos + 1
+	out := make([]Any, 0)
+	for *pos < len(raw) {
+		switch raw[*pos] {
+		case '}':
+			*pos++
+			return out, true
+		case '{':
+			item, ok := parsePGArrayItems(raw, pos)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, item)
+		default:
+			item, ok := parsePGArrayScalar(raw, pos)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, item)
+		}
+		if *pos >= len(raw) {
+			return nil, false
+		}
+		switch raw[*pos] {
+		case ',':
+			*pos++
+			continue
+		case '}':
+			continue
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func parsePGArrayScalar(raw string, pos *int) (Any, bool) {
+	if *pos >= len(raw) {
+		return nil, false
+	}
+	if raw[*pos] == '"' {
+		*pos = *pos + 1
+		var buf strings.Builder
+		for *pos < len(raw) {
+			ch := raw[*pos]
+			switch ch {
+			case '\\':
+				*pos = *pos + 1
+				if *pos >= len(raw) {
+					return nil, false
+				}
+				buf.WriteByte(raw[*pos])
+				*pos = *pos + 1
+			case '"':
+				*pos = *pos + 1
+				return buf.String(), true
+			default:
+				buf.WriteByte(ch)
+				*pos = *pos + 1
+			}
+		}
+		return nil, false
+	}
+	start := *pos
+	for *pos < len(raw) && raw[*pos] != ',' && raw[*pos] != '}' {
+		*pos = *pos + 1
+	}
+	token := raw[start:*pos]
+	if strings.EqualFold(token, "NULL") {
+		return nil, true
+	}
+	return token, true
 }
