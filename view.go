@@ -26,6 +26,10 @@ type sqlView struct {
 type sqlPlan struct {
 	SQL    string
 	Params []Any
+}
+
+type cachedSQLPlan struct {
+	Plan   sqlPlan
 	Hits   atomic.Int64
 	UsedAt atomic.Int64
 }
@@ -677,13 +681,13 @@ func (v *sqlView) loadSQLPlan(kind string, q Query) (string, []Any, bool) {
 	if !ok {
 		return "", nil, false
 	}
-	plan, ok := raw.(*sqlPlan)
-	if !ok || strings.TrimSpace(plan.SQL) == "" {
+	plan, ok := raw.(*cachedSQLPlan)
+	if !ok || strings.TrimSpace(plan.Plan.SQL) == "" {
 		return "", nil, false
 	}
 	plan.Hits.Add(1)
 	plan.UsedAt.Store(time.Now().UnixNano())
-	return plan.SQL, cloneAnySlice(plan.Params), true
+	return plan.Plan.SQL, cloneAnySlice(plan.Plan.Params), true
 }
 
 func (v *sqlView) storeSQLPlan(kind string, q Query, sqlText string, params []Any) {
@@ -698,12 +702,12 @@ func (v *sqlView) storeSQLPlan(kind string, q Query, sqlText string, params []An
 	if key == "" || strings.TrimSpace(sqlText) == "" {
 		return
 	}
-	plan := &sqlPlan{SQL: sqlText, Params: cloneAnySlice(params)}
+	plan := &cachedSQLPlan{Plan: sqlPlan{SQL: sqlText, Params: cloneAnySlice(params)}}
 	plan.Hits.Store(1)
 	plan.UsedAt.Store(time.Now().UnixNano())
 	actual, loaded := sqlPlanCache.LoadOrStore(key, plan)
 	if loaded {
-		if cached, ok := actual.(*sqlPlan); ok {
+		if cached, ok := actual.(*cachedSQLPlan); ok {
 			cached.Hits.Add(1)
 			cached.UsedAt.Store(time.Now().UnixNano())
 		}
@@ -740,7 +744,7 @@ func sqlPlanVictimKey() (Any, bool) {
 	var victimUsedAt int64
 	found := false
 	sqlPlanCache.Range(func(k, v any) bool {
-		plan, ok := v.(*sqlPlan)
+		plan, ok := v.(*cachedSQLPlan)
 		if !ok || k == nil {
 			return true
 		}
