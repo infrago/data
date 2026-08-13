@@ -1181,13 +1181,23 @@ func migrateColumnExtras(d Dialect, field Var) string {
 	if field.Unique {
 		out += " UNIQUE"
 	}
-	if strings.TrimSpace(field.Check) != "" {
-		out += " CHECK (" + strings.TrimSpace(field.Check) + ")"
+	if check := migrateCheckExpression(field.Check); check != "" {
+		out += " CHECK (" + check + ")"
 	}
 	if strings.Contains(strings.ToLower(d.Name()), "mysql") && strings.TrimSpace(field.Comment) != "" {
 		out += " COMMENT '" + strings.ReplaceAll(field.Comment, "'", "''") + "'"
 	}
 	return out
+}
+
+func migrateCheckExpression(check string) string {
+	check = strings.TrimSpace(check)
+	switch strings.ToLower(check) {
+	case "password", "email", "mobile":
+		return ""
+	default:
+		return check
+	}
 }
 
 func migrateDefaultLiteral(v Any) (string, bool) {
