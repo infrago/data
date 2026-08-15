@@ -1209,6 +1209,9 @@ func migrateColumnExtras(d Dialect, field Var) string {
 	out := ""
 	if field.Default != nil {
 		if lit, ok := migrateDefaultLiteral(field.Default); ok {
+			if isMySQLExpressionDefault(d.Name(), field.Type) {
+				lit = "(" + lit + ")"
+			}
 			out += " DEFAULT " + lit
 		}
 	}
@@ -1225,6 +1228,14 @@ func migrateColumnExtras(d Dialect, field Var) string {
 		out += " COMMENT '" + strings.ReplaceAll(field.Comment, "'", "''") + "'"
 	}
 	return out
+}
+
+func isMySQLExpressionDefault(dialect, typ string) bool {
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(dialect)), "mysql") {
+		return false
+	}
+	sqlType := strings.ToUpper(strings.TrimSpace(migrateType(dialect, typ)))
+	return sqlType == "TEXT" || sqlType == "JSON" || strings.Contains(sqlType, "BLOB")
 }
 
 func migrateCheckExpression(check string) string {
