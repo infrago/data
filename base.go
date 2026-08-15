@@ -1110,8 +1110,7 @@ func (b *sqlBase) tableExists(schema, table string) (bool, error) {
 	target := b.sourceExpr(schema, table)
 	rows, cancel, err := b.querySQL(10*time.Second, "SELECT * FROM "+target+" WHERE 1=0")
 	if err != nil {
-		msg := strings.ToLower(err.Error())
-		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such table") || strings.Contains(msg, "unknown table") {
+		if isMissingTableError(err) {
 			return false, nil
 		}
 		return false, err
@@ -1119,6 +1118,17 @@ func (b *sqlBase) tableExists(schema, table string) (bool, error) {
 	defer cancel()
 	_ = rows.Close()
 	return true, nil
+}
+
+func isMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "no such table") ||
+		strings.Contains(msg, "unknown table")
 }
 
 func (b *sqlBase) buildCreateTableSQL(schema, table, key string, fields Vars) (string, error) {

@@ -2,6 +2,7 @@ package data
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -85,6 +86,23 @@ func TestBuildCreateTableKeepsExplicitStringPrimaryKey(t *testing.T) {
 	}
 	if strings.Contains(query, "IDENTITY") {
 		t.Fatalf("string primary key became an identity: %s", query)
+	}
+}
+
+func TestMissingTableErrorsAcrossSQLDrivers(t *testing.T) {
+	missing := []string{
+		`pq: relation "public.accounts" does not exist`,
+		`Error 1146 (42S02): Table 'main.accounts' doesn't exist`,
+		`SQL logic error: no such table: accounts`,
+		`unknown table 'accounts'`,
+	}
+	for _, message := range missing {
+		if !isMissingTableError(errors.New(message)) {
+			t.Fatalf("missing-table error was not recognized: %s", message)
+		}
+	}
+	if isMissingTableError(errors.New("connection refused")) {
+		t.Fatal("unrelated error was classified as a missing table")
 	}
 }
 
