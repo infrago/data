@@ -106,17 +106,18 @@ func TestMissingTableErrorsAcrossSQLDrivers(t *testing.T) {
 	}
 }
 
-func TestBuildCreateTableWrapsMySQLTextAndJSONDefaultsAsExpressions(t *testing.T) {
+func TestBuildCreateTableUsesIndexableMySQLStringsAndExpressionDefaults(t *testing.T) {
 	base := &sqlBase{conn: namedMigrationTestConnection{dialect: "mysql"}}
 	query, err := base.buildCreateTableSQL("", "clients", "id", Vars{
-		"platform": Var{Type: "string", Default: "unknown"},
-		"setting":  Var{Type: "json", Default: Map{}},
-		"attempts": Var{Type: "int", Default: 0},
+		"platform":    Var{Type: "string", Default: "unknown"},
+		"description": Var{Type: "text", Default: "long"},
+		"setting":     Var{Type: "json", Default: Map{}},
+		"attempts":    Var{Type: "int", Default: 0},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"platform" TEXT DEFAULT ('unknown')`, `"setting" JSON DEFAULT ('{}')`, `"attempts" BIGINT DEFAULT 0`} {
+	for _, want := range []string{`"platform" VARCHAR(255) DEFAULT 'unknown'`, `"description" TEXT DEFAULT ('long')`, `"setting" JSON DEFAULT ('{}')`, `"attempts" BIGINT DEFAULT 0`} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("missing MySQL default %q in %s", want, query)
 		}

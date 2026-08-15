@@ -2467,6 +2467,11 @@ func migrateType(dialect, typ string) string {
 			return "DATETIME"
 		}
 		return "TIMESTAMP"
+	case t == "string" || t == "enum" || t == "uuid":
+		if strings.Contains(strings.ToLower(dialect), "mysql") {
+			return "VARCHAR(255)"
+		}
+		return "TEXT"
 	case t == "json" || t == "jsonb":
 		if strings.Contains(dialect, "mysql") || strings.Contains(dialect, "pgsql") || strings.Contains(dialect, "postgres") {
 			return "JSON"
