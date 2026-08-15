@@ -50,6 +50,16 @@ import _ "github.com/infrago/data"
 driver = "default"
 ```
 
+生产连接串可以只从环境变量读取，避免把凭据写入配置文件：
+
+```toml
+[data.main]
+driver = "postgresql"
+url_env = "APP_DATABASE_DSN"
+```
+
+`url_env`（也兼容 `dsn_env`）优先于 `url`。变量名只能包含大写字母、数字和下划线且不能以数字开头；变量缺失或为空时启动会立即失败，错误信息不会包含连接串。
+
 ## 驱动实现接口列表
 
 以下接口由驱动实现（来自模块 `driver.go`）：
@@ -78,7 +88,16 @@ driver = "default"
 
 配置段：`[data]`
 
-- 未检测到配置键（请查看模块源码的 configure 逻辑）
+- `driver`：已注册的数据驱动名
+- `url`：直接配置的连接串，适合本地开发
+- `url_env` / `dsn_env`：保存连接串的环境变量名，适合生产和 CI
+- `schema`：默认数据库 schema
+- `mapping`：启用字段名映射
+- `read_only`：只读连接
+- `trash`：软删除配置
+- `pool`：连接池配置
+- `migrate`：迁移启动与安全策略
+- `setting`：驱动专属设置
 
 ## 说明
 

@@ -231,6 +231,7 @@ func (m *Module) configure(name string, cfg Map) {
 	if v, ok := cfg["url"].(string); ok {
 		out.Url = v
 	}
+	out.Url = configuredURL(cfg, out.Url)
 	if v, ok := cfg["schema"].(string); ok {
 		out.Schema = v
 	}
@@ -401,6 +402,38 @@ func (m *Module) configure(name string, cfg Map) {
 	out.Trash = normalizeTrashOptions(out.Trash)
 
 	m.configs[name] = out
+}
+
+func configuredURL(cfg Map, fallback string) string {
+	envName := ""
+	for _, key := range []string{"url_env", "urlEnv", "dsn_env", "dsnEnv"} {
+		if value, ok := cfg[key].(string); ok && strings.TrimSpace(value) != "" {
+			envName = strings.TrimSpace(value)
+			break
+		}
+	}
+	if envName == "" {
+		return fallback
+	}
+	if !validEnvironmentName(envName) {
+		panic(fmt.Sprintf("data: invalid DSN environment variable name %q", envName))
+	}
+	value, exists := os.LookupEnv(envName)
+	value = strings.TrimSpace(value)
+	if !exists || value == "" {
+		panic(fmt.Sprintf("data: required DSN environment variable %s is empty", envName))
+	}
+	return value
+}
+
+func validEnvironmentName(name string) bool {
+	for index, char := range name {
+		if (char >= 'A' && char <= 'Z') || char == '_' || (index > 0 && char >= '0' && char <= '9') {
+			continue
+		}
+		return false
+	}
+	return name != ""
 }
 
 func isDataReservedMapKey(key string) bool {
