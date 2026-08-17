@@ -332,7 +332,7 @@ func parseFilterMap(m Map) (Expr, queryOptions, error) {
 			switch key {
 			case OptSelect:
 				opts.selects = parseStringList(val)
-			case OptSort:
+			case OptSort, OptSorts:
 				opts.sorts = parseSorts(val)
 			case OptLimit:
 				if vv, ok := parseInt64(val); ok {

@@ -127,3 +127,24 @@ func TestParseQueryNestedFiltersList(t *testing.T) {
 		t.Fatalf("expected 2 filter items, got %#v", and.Items)
 	}
 }
+
+func TestParseQueryOrderedSorts(t *testing.T) {
+	q, err := ParseQuery(Map{
+		OptSorts: []Map{
+			{"priority": DESC},
+			{"id": ASC},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(q.Sort) != 2 {
+		t.Fatalf("expected 2 sorts, got %#v", q.Sort)
+	}
+	if q.Sort[0].Field != "priority" || !q.Sort[0].Desc {
+		t.Fatalf("unexpected primary sort: %#v", q.Sort[0])
+	}
+	if q.Sort[1].Field != "id" || q.Sort[1].Desc {
+		t.Fatalf("unexpected secondary sort: %#v", q.Sort[1])
+	}
+}
