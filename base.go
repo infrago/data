@@ -2152,7 +2152,8 @@ func (b *sqlBase) planColumnDiffActions(schema, table, dbKey string, desired map
 		}
 		gotDefault := normalizeColumnDefault(info.Default)
 		gotHasDefault := info.HasDefault && gotDefault != "" && gotDefault != "null"
-		if gotHasDefault != wantHasDefault || (gotHasDefault && wantHasDefault && gotDefault != wantDefault) {
+		generatedPrimaryDefault := strings.EqualFold(name, dbKey) && isIntegerMigrateType(field.Type) && isGeneratedPrimaryDefault(dialect, info.Default)
+		if !generatedPrimaryDefault && (gotHasDefault != wantHasDefault || (gotHasDefault && wantHasDefault && gotDefault != wantDefault)) {
 			from, to := "<none>", "<none>"
 			if gotHasDefault {
 				from = info.Default
@@ -2334,6 +2335,12 @@ func normalizeColumnDefault(raw string) string {
 	}
 	s = strings.Trim(s, "'\"`")
 	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+func isGeneratedPrimaryDefault(dialect, raw string) bool {
+	dialect = strings.ToLower(strings.TrimSpace(dialect))
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	return (dialect == "pgsql" || dialect == "postgres" || dialect == "postgresql") && strings.HasPrefix(raw, "nextval(")
 }
 
 func (b *sqlBase) migrateIndexes(schema, table string, indexes []Index, setting Map) error {

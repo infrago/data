@@ -97,3 +97,18 @@ func TestPlanColumnDiffActionsKeepsDefaultLiteralSQL(t *testing.T) {
 		t.Fatalf("expected quoted default literal, got %#v", actions[0])
 	}
 }
+
+func TestPlanColumnDiffActionsKeepsPostgresSequencePrimaryKey(t *testing.T) {
+	base := &sqlBase{conn: &writeNormalizeTestConn{}}
+	actions := base.planColumnDiffActions("", "users", "id", map[string]Var{
+		"id": {Type: "int", Required: true},
+	}, map[string]columnInfo{
+		"id": {
+			Name: "id", Type: "bigint", Nullable: false, HasNullable: true,
+			Default: "nextval('users_id_seq'::regclass)", HasDefault: true,
+		},
+	}, MigrateOptions{Mode: "safe"})
+	if len(actions) != 0 {
+		t.Fatalf("sequence-backed primary key must remain generated, got %#v", actions)
+	}
+}
