@@ -2484,6 +2484,11 @@ func migrateType(dialect, typ string) string {
 			return "JSON"
 		}
 		return "TEXT"
+	case strings.HasPrefix(t, "[") || strings.HasPrefix(t, "array"):
+		if strings.Contains(dialect, "mysql") || strings.Contains(dialect, "pgsql") || strings.Contains(dialect, "postgres") {
+			return "JSON"
+		}
+		return "TEXT"
 	default:
 		return "TEXT"
 	}

@@ -124,6 +124,32 @@ func TestBuildCreateTableUsesIndexableMySQLStringsAndExpressionDefaults(t *testi
 	}
 }
 
+func TestBuildCreateTableUsesPortableCollectionStorage(t *testing.T) {
+	tests := []struct {
+		dialect string
+		want    string
+	}{
+		{dialect: "sqlite", want: `"tags" TEXT`},
+		{dialect: "pgsql", want: `"tags" JSON`},
+		{dialect: "mysql", want: `"tags" JSON`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dialect, func(t *testing.T) {
+			base := &sqlBase{conn: namedMigrationTestConnection{dialect: tt.dialect}}
+			query, err := base.buildCreateTableSQL("", "items", "id", Vars{
+				"id":   Var{Type: "int"},
+				"tags": Var{Type: "[string]", Default: []string{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(query, tt.want) {
+				t.Fatalf("missing portable collection storage %q in %s", tt.want, query)
+			}
+		})
+	}
+}
+
 type migrationTestConnection struct{}
 
 func (migrationTestConnection) Open() error      { return nil }

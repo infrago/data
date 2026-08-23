@@ -188,6 +188,15 @@ func DecodePGArrayValue(cfg Var, value Any) (Any, bool) {
 }
 
 func bindStructuredValue(d Dialect, cfg Var, value Any) (Any, bool) {
+	// Collection fields are a portable JSON contract. PostgreSQL also exposes a
+	// native array binder, but using it here makes the same `[string]` model write
+	// `{a,b}` while MySQL and SQLite write `["a","b"]`. More importantly, the
+	// portable migration maps collections to JSON/JSONB, where a PostgreSQL array
+	// literal is invalid JSON. Encode collections before consulting the driver so
+	// every backend persists the same representation.
+	if isArrayVar(cfg) {
+		return BindJSONValue(value)
+	}
 	if binder, ok := d.(ValueBinder); ok {
 		if out, yes := binder.BindValue(cfg, value); yes {
 			return out, true
@@ -202,12 +211,6 @@ func bindStructuredValue(d Dialect, cfg Var, value Any) (Any, bool) {
 		return BindTextValue(value)
 	case valueKindTime:
 		return BindTimeValue(value)
-	}
-	if isArrayVar(cfg) {
-		if binder, ok := d.(ArrayBinder); ok {
-			return binder.BindArray(value), true
-		}
-		return BindJSONValue(value)
 	}
 	return nil, false
 }

@@ -40,7 +40,7 @@ func (writeNormalizePlainDialect) Placeholder(int) string  { return "$1" }
 func (writeNormalizePlainDialect) SupportsILike() bool     { return true }
 func (writeNormalizePlainDialect) SupportsReturning() bool { return true }
 
-func TestNormalizeWriteValueForPostgresArrayField(t *testing.T) {
+func TestNormalizeWriteValueUsesPortableJSONForPostgresArrayField(t *testing.T) {
 	table := &sqlTable{
 		sqlView: sqlView{
 			base: &sqlBase{
@@ -52,11 +52,11 @@ func TestNormalizeWriteValueForPostgresArrayField(t *testing.T) {
 			},
 		},
 	}
-	if got := table.normalizeWriteValue("roleIds", []int64{}); !reflect.DeepEqual(got, writeNormalizeBoundArray{value: []int64{}}) {
-		t.Fatalf("expected bound postgres array wrapper, got %#v", got)
+	if got := table.normalizeWriteValue("roleIds", []int64{}); got != `[]` {
+		t.Fatalf("expected empty JSON array, got %#v", got)
 	}
-	if got := table.normalizeWriteValue("roleIds", []int64{3, 5}); !reflect.DeepEqual(got, writeNormalizeBoundArray{value: []int64{3, 5}}) {
-		t.Fatalf("expected bound postgres array wrapper, got %#v", got)
+	if got := table.normalizeWriteValue("roleIds", []int64{3, 5}); got != `[3,5]` {
+		t.Fatalf("expected portable JSON array, got %#v", got)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestDecodeStructuredFieldValueForArrayFlag(t *testing.T) {
 	}
 }
 
-func TestNormalizeWriteValueForPostgresArrayFlag(t *testing.T) {
+func TestNormalizeWriteValueUsesPortableJSONForArrayFlag(t *testing.T) {
 	table := &sqlTable{
 		sqlView: sqlView{
 			base: &sqlBase{
@@ -144,8 +144,8 @@ func TestNormalizeWriteValueForPostgresArrayFlag(t *testing.T) {
 		},
 	}
 
-	if got := table.normalizeWriteValue("tags", []string{}); !reflect.DeepEqual(got, writeNormalizeBoundArray{value: []string{}}) {
-		t.Fatalf("expected empty postgres array literal by flag, got %#v", got)
+	if got := table.normalizeWriteValue("tags", []string{}); got != `[]` {
+		t.Fatalf("expected empty JSON array by flag, got %#v", got)
 	}
 }
 
