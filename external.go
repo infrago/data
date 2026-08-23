@@ -93,7 +93,7 @@ func GetCapabilities(names ...string) (Capabilities, error) {
 }
 
 func GetStats(names ...string) Stats {
-	return module.Stats(names...)
+	return module.QueryStats(names...)
 }
 
 func GetPoolStats(names ...string) []PoolStats {

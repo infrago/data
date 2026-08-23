@@ -2454,7 +2454,13 @@ func (b *sqlBase) logSlow(query string, args []Any, start time.Time) {
 	}
 	statsFor(b.inst.Name).Slow.Add(1)
 	observeSlowCost(b.inst.Name, cost)
-	fmt.Printf("[data][slow] conn=%s dialect=%s cost=%s sql=%s args=%v\n", b.inst.Name, b.conn.Dialect().Name(), cost.String(), query, args)
+	infra.Log(infra.LogLevelWarning, "data", "slow query", Map{
+		"connection": b.inst.Name,
+		"dialect":    b.conn.Dialect().Name(),
+		"cost_ms":    cost.Milliseconds(),
+		"sql":        query,
+		"args":       args,
+	})
 }
 
 func migrateType(dialect, typ string) string {

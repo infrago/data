@@ -91,7 +91,7 @@ func statsFor(name string) *moduleStats {
 	return actual.(*moduleStats)
 }
 
-func (m *Module) Stats(names ...string) Stats {
+func (m *Module) QueryStats(names ...string) Stats {
 	name := "default"
 	if len(names) > 0 && strings.TrimSpace(names[0]) != "" {
 		name = names[0]

@@ -610,7 +610,9 @@ func (m *Module) Start() {
 				if err := db.Error(); err != nil {
 					panic(fmt.Sprintf("data migrate(auto) failed on %s: %v", target.name, err))
 				}
-				fmt.Printf("infrago data migrate(auto) done on %s.\n", target.name)
+				infra.Log(infra.LogLevelInfo, "data", "migration completed", Map{
+					"connection": target.name, "mode": "auto",
+				})
 			case "check":
 				report := db.MigrateDiff()
 				if err := db.Error(); err != nil {
@@ -619,12 +621,14 @@ func (m *Module) Start() {
 				if len(report.Actions) > 0 {
 					panic(fmt.Sprintf("data migrate(check) drift detected on %s: %d actions", target.name, len(report.Actions)))
 				}
-				fmt.Printf("infrago data migrate(check) passed on %s.\n", target.name)
+				infra.Log(infra.LogLevelInfo, "data", "migration check passed", Map{
+					"connection": target.name, "mode": "check",
+				})
 			}
 		}()
 	}
 
-	fmt.Printf("infrago data module is running with %d connections.\n", len(targets))
+	infra.Log(infra.LogLevelInfo, "data", "module started", Map{"connections": len(targets)})
 }
 
 func resolveMigrateStartup(startup string) string {
@@ -712,7 +716,7 @@ func (m *Module) PoolStats(names ...string) []PoolStats {
 			ps.WaitDuration = stats.WaitDuration.Milliseconds()
 			ps.MaxOpen = stats.MaxOpenConnections
 		}
-		ss := m.Stats(name)
+		ss := m.QueryStats(name)
 		ps.Queries = ss.Queries
 		ps.Writes = ss.Writes
 		ps.Errors = ss.Errors
